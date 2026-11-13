@@ -1311,17 +1311,17 @@ class UyapDownloaderApp:
         ttk.Button(frow3, text="Klasör Seç...", command=self.on_choose_dir).pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(frow3, text="Bekleme (sn):").pack(side=tk.LEFT)
-        self.var_min_delay = tk.DoubleVar(value=3.5)
-        self.var_max_delay = tk.DoubleVar(value=7.0)
-        ttk.Spinbox(frow3, from_=1.5, to=30.0, increment=0.5, textvariable=self.var_min_delay, width=4).pack(side=tk.LEFT, padx=1)
+        self.var_min_delay = tk.DoubleVar(value=2.0)
+        self.var_max_delay = tk.DoubleVar(value=4.0)
+        ttk.Spinbox(frow3, from_=1.0, to=30.0, increment=0.5, textvariable=self.var_min_delay, width=4).pack(side=tk.LEFT, padx=1)
         ttk.Label(frow3, text="-").pack(side=tk.LEFT)
-        ttk.Spinbox(frow3, from_=2.0, to=60.0, increment=0.5, textvariable=self.var_max_delay, width=4).pack(side=tk.LEFT, padx=(1, 8))
+        ttk.Spinbox(frow3, from_=1.5, to=60.0, increment=0.5, textvariable=self.var_max_delay, width=4).pack(side=tk.LEFT, padx=(1, 8))
 
         ttk.Label(frow3, text="Her").pack(side=tk.LEFT)
-        self.var_batch_size = tk.IntVar(value=15)
+        self.var_batch_size = tk.IntVar(value=20)
         ttk.Spinbox(frow3, from_=5, to=100, textvariable=self.var_batch_size, width=3).pack(side=tk.LEFT, padx=1)
         ttk.Label(frow3, text="dosyada").pack(side=tk.LEFT)
-        self.var_batch_pause = tk.DoubleVar(value=20.0)
+        self.var_batch_pause = tk.DoubleVar(value=10.0)
         ttk.Spinbox(frow3, from_=5.0, to=120.0, increment=5.0, textvariable=self.var_batch_pause, width=4).pack(side=tk.LEFT, padx=1)
         ttk.Label(frow3, text="sn dinlen").pack(side=tk.LEFT, padx=(0, 8))
 
@@ -2363,9 +2363,37 @@ def run_cli_mode(args):
         ranges.append((cur, nxt))
         cur = nxt + dt.timedelta(days=1)
 
-    print(f"[*] İşlemlerim {len(ranges)} dilim halinde taranıyor...")
+    cache_file = BASE_DIR / "taranan_islem_cache.json"
     all_items = []
     seen_keys = set()
+    use_cache = False
+
+    if cache_file.exists():
+        try:
+            cdata = json.loads(cache_file.read_text(encoding="utf-8"))
+            if (
+                cdata.get("start_date") == start_d.strftime("%d.%m.%Y")
+                and cdata.get("end_date") == end_d.strftime("%d.%m.%Y")
+                and (time.time() - cdata.get("timestamp", 0)) < 43200
+                and isinstance(cdata.get("items"), list)
+                and len(cdata["items"]) > 0
+            ):
+                all_items = cdata["items"]
+                for it in all_items:
+                    if "tarih" in it and "tarih_obj" not in it:
+                        try:
+                            it["tarih_obj"] = dt.datetime.strptime(it["tarih"], "%Y-%m-%d")
+                        except Exception:
+                            it["tarih_obj"] = start_d
+                print(f"[✓] Önbellekten {len(all_items)} adet işlem kaydı anında yüklendi (84 dilim tekrar taranmadan devam ediliyor).")
+                use_cache = True
+        except Exception:
+            use_cache = False
+
+    if use_cache:
+        ranges = []
+    else:
+        print(f"[*] İşlemlerim {len(ranges)} dilim halinde taranıyor...")
 
     for idx, (s_d, e_d) in enumerate(ranges, start=1):
         s_str = s_d.strftime("%d.%m.%Y")
@@ -2507,9 +2535,28 @@ def run_cli_mode(args):
 
         print(f"  [{idx}/{len(ranges)}] {s_str} - {e_str} -> {len(rows)} kayıt ({chunk_added} yeni)")
         if idx < len(ranges):
-            time.sleep(random.uniform(1.8, 3.2))
+            time.sleep(random.uniform(0.3, 0.6))
 
-    print(f"\n[✓] Toplam {len(all_items)} işlem/evrak kaydı tarandı.")
+    if not use_cache and all_items:
+        try:
+            serializable_items = []
+            for it in all_items:
+                item_copy = dict(it)
+                item_copy.pop("tarih_obj", None)
+                serializable_items.append(item_copy)
+            cache_file.write_text(
+                json.dumps({
+                    "start_date": start_d.strftime("%d.%m.%Y"),
+                    "end_date": end_d.strftime("%d.%m.%Y"),
+                    "timestamp": time.time(),
+                    "items": serializable_items
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    print(f"\n[✓] Toplam {len(all_items)} işlem/evrak kaydı hazır.")
 
     # 6. Mükerrerlik Filtresi: Diskte sağlam olanları atla
     download_queue = [
@@ -2527,15 +2574,15 @@ def run_cli_mode(args):
         print("[✓] Tebrikler! Tüm evraklar zaten diskte sağlam ve eksiksiz mevcut. İndirilecek yeni evrak yok.")
         return
 
-    # 7. Güvenli İndirme Döngüsü
-    min_d = 2.5
-    max_d = 5.5
-    batch_n = 15
-    batch_pause = 15.0
+    # 7. Güvenli Hızlı İndirme Döngüsü
+    min_d = 1.2
+    max_d = 2.8
+    batch_n = 20
+    batch_pause = 10.0
     downloaded_now = 0
     max_retries = 3
 
-    print(f"[*] Güvenli indirme başlatılıyor ({min_d}-{max_d} sn bekleme, her {batch_n} dosyada {batch_pause:.0f} sn mola)...")
+    print(f"[*] Güvenli hızlı indirme başlatılıyor ({min_d}-{max_d} sn bekleme, her {batch_n} dosyada {batch_pause:.0f} sn mola)...")
 
     for idx, item in enumerate(download_queue, start=1):
         ukey = item["unique_key"]
