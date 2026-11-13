@@ -41,17 +41,26 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
+import argparse
+import shutil
 import requests
 import websocket
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog
+    HAS_TKINTER = True
+except ImportError:
+    HAS_TKINTER = False
 
 # ---------------------------------------------------------------------------
 # Dizin ve Yapılandırma Sabitleri
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_DOWNLOAD_DIR = BASE_DIR / "UYAP_Indirilenler"
+if Path("/sdcard/Download").exists():
+    DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
+else:
+    DEFAULT_DOWNLOAD_DIR = BASE_DIR / "UYAP_Indirilenler"
 CHROME_PROFILE_DIR = BASE_DIR / ".uyap_chrome_profile"
 HISTORY_FILE = BASE_DIR / "indirme_gecmisi.json"
 LOG_FILE = BASE_DIR / "uyap_indirici_log.txt"
@@ -262,18 +271,34 @@ class UyapBrowserBridge:
     def __init__(self, port: int = CDP_PORT):
         self.port = port
         self.proc: subprocess.Popen | None = None
+        self.is_headless = False
 
-    def launch_or_connect(self) -> tuple[bool, str]:
-        """Chromium açık değilse başlatır, açıksa UYAP sekmesine bağlanır."""
+    @staticmethod
+    def _find_chrome_bin() -> str | None:
+        candidates = [
+            shutil.which("chromium"),
+            shutil.which("chromium-browser"),
+            shutil.which("google-chrome"),
+            shutil.which("google-chrome-stable"),
+            "/usr/lib64/chromium-browser/chromium-browser",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/data/data/com.termux/files/usr/bin/chromium",
+        ]
+        for c in candidates:
+            if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        return None
+
+    def launch_or_connect(self, headless: bool = False) -> tuple[bool, str]:
+        """Chromium açık değilse başlatır (opsiyonel headless), açıksa UYAP sekmesine bağlanır."""
+        self.is_headless = headless
         if self._is_port_open():
             return True, f"Mevcut Chromium oturumuna bağlanıldı (Port {self.port})."
 
-        chrome_bin = "/usr/lib64/chromium-browser/chromium-browser"
-        if not os.path.exists(chrome_bin):
-            for alt in ("/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"):
-                if os.path.exists(alt):
-                    chrome_bin = alt
-                    break
+        chrome_bin = self._find_chrome_bin()
+        if not chrome_bin:
+            return False, "Sistemde Chromium veya Google Chrome bulunamadı. Lütfen kurun (pkg install chromium veya sudo dnf install chromium)."
 
         CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         cmd = [
@@ -283,8 +308,16 @@ class UyapBrowserBridge:
             f"--user-data-dir={CHROME_PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
-            UYAP_BASE_URL,
         ]
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if headless or not has_display:
+            self.is_headless = True
+            cmd.extend([
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+            ])
+        cmd.append(UYAP_BASE_URL)
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -297,7 +330,8 @@ class UyapBrowserBridge:
         for _ in range(30):
             time.sleep(0.4)
             if self._is_port_open():
-                return True, "Chromium başlatıldı. UYAP Portal sekmesi hazır."
+                mode_str = "Headless / Arka Plan" if self.is_headless else "Pencereli"
+                return True, f"Chromium başlatıldı ({mode_str}). UYAP Portal sekmesi hazır."
 
         return False, "Chromium başlatıldı ancak hata ayıklama portuna (9223) ulaşılamadı."
 
@@ -1512,9 +1546,18 @@ class UyapDownloaderApp:
 
         self.lbl_count.config(text=f"Toplam: {len(self.all_items)} | Filtrelenen: {len(self.filtered_items)}")
 
-    def build_target_filepath(self, item: dict, ext: str) -> Path:
-        base_dir = Path(self.var_download_dir.get().strip() or str(DEFAULT_DOWNLOAD_DIR))
-        tpl = self.var_template.get().strip() or FOLDER_PRESETS[0][1]
+    def build_target_filepath(self, item: dict, ext: str, override_dir: Path | None = None) -> Path:
+        if override_dir:
+            base_dir = Path(override_dir)
+        elif hasattr(self, "var_download_dir"):
+            base_dir = Path(self.var_download_dir.get().strip() or str(DEFAULT_DOWNLOAD_DIR))
+        else:
+            base_dir = DEFAULT_DOWNLOAD_DIR
+
+        if hasattr(self, "var_template"):
+            tpl = self.var_template.get().strip() or FOLDER_PRESETS[0][1]
+        else:
+            tpl = FOLDER_PRESETS[0][1]
 
         tokens = {
             "kaynak": sanitize_path_part(item.get("kaynak"), "UYAP"),
@@ -1528,14 +1571,16 @@ class UyapDownloaderApp:
             "evrak_turu": sanitize_path_part(item.get("evrak_turu"), "Evrak_Turu"),
             "evrak_adi": sanitize_path_part(item.get("evrak_adi"), "Evrak"),
             "evrak_id": sanitize_path_part(item.get("evrak_id"), "0"),
+            "is_emir_no": sanitize_path_part(item.get("is_emir_no"), ""),
         }
 
         rel_str = tpl.format(**tokens)
         parts = [sanitize_path_part(p, "Klasor", max_len=90) for p in rel_str.replace("\\", "/").split("/") if p.strip()]
         if not parts:
-            parts = [f"evrak_{tokens['evrak_id']}"]
+            parts = [f"evrak_{tokens['is_emir_no'] or tokens['evrak_id']}"]
 
-        filename_stem = f"{parts[-1]}_{tokens['evrak_id']}"
+        ident = tokens["is_emir_no"] or tokens["evrak_id"]
+        filename_stem = f"{parts[-1]}_{ident}"
         folder_path = base_dir.joinpath(*parts[:-1])
         folder_path.mkdir(parents=True, exist_ok=True)
         return folder_path / f"{filename_stem}{ext}"
@@ -1832,10 +1877,359 @@ class UyapDownloaderApp:
         self.log(f"Liste dışa aktarıldı: {path}")
 
 
+def run_cli_mode(args):
+    """
+    Termux / Android / Konsol / Headless CLI Modu:
+    Grafik ekran (X11) gerektirmeden doğrudan terminal üzerinden çalışır.
+    """
+    print("\n" + "=" * 70)
+    print("  UYAP Avukat Portal - Güvenli Evrak İndirici (Terminal & CLI Modu)")
+    print("=" * 70)
+
+    # 1. İndirme dizini belirle
+    if args.dir:
+        download_dir = Path(args.dir)
+    elif Path("/sdcard/Download").exists():
+        download_dir = Path("/sdcard/Download/UYAP_Indirilenler")
+    else:
+        download_dir = DEFAULT_DOWNLOAD_DIR
+    download_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[*] İndirme Klasörü: {download_dir}")
+
+    # 2. Chromium Köprüsünü Başlat
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    headless = args.headless or not has_display
+    bridge = UyapBrowserBridge(port=args.port)
+    ok, msg = bridge.launch_or_connect(headless=headless)
+    print(f"[*] {msg}")
+
+    # 3. Oturum Kontrolü & e-İmza / Mobil İmza Bekleme
+    pin = args.pin or DEFAULT_E_IMZA_PIN
+    auto_relogin = not args.no_auto_relogin
+
+    print("[*] UYAP oturum durumu kontrol ediliyor...")
+    info = bridge.check_login_and_user()
+    user = info.get("user") or {}
+    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
+
+    # e-İmza varsa otomatik dene
+    if not tckn and auto_relogin and pin:
+        print(f"[*] e-İmza ile otomatik giriş deneniyor (PIN: {pin[:2]}**)...")
+        re_ok, re_msg = bridge.auto_relogin(pin=pin)
+        if re_ok:
+            print(f"[✓] {re_msg}")
+            time.sleep(1.0)
+            info = bridge.check_login_and_user()
+            user = info.get("user") or {}
+            tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
+
+    # Oturum açılmamışsa bekle (Mobil İmza / e-Devlet veya e-İmza)
+    if not tckn:
+        print("\n" + "-" * 70)
+        print(" [!] UYAP OTURUMU AÇIK DEĞİL!")
+        print(" Lütfen UYAP Avukat Portal'a giriş yapınız:")
+        print("   - Mobil İmza (SIM kart onayı)")
+        print("   - e-İmza (ArkSigner / USB Token)")
+        print("   - e-Devlet Kapısı")
+        if not headless:
+            print(" Açık olan Chromium tarayıcı penceresinden giriş yapabilirsiniz.")
+        else:
+            print(f" Tarayıcı arkaplanda çalışıyor. Giriş bekleniyor ({UYAP_BASE_URL})...")
+        print(" Sistem girişinizi otomatik olarak algılayıp indirmeye başlayacaktır.")
+        print("-" * 70 + "\n")
+
+        while not tckn:
+            time.sleep(2.5)
+            try:
+                info = bridge.check_login_and_user()
+                user = info.get("user") or {}
+                tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
+            except Exception:
+                pass
+
+    full_name = f"{user.get('adi', '')} {user.get('soyadi', '')}".strip() or "Avukat"
+    baro = user.get("baroAdi") or ""
+    print(f"[✓] Giriş Başarılı: {full_name} (TCKN: {tckn} - {baro})")
+
+    # 4. Geçmişi yükle ve doğrula
+    app_helper = UyapDownloaderApp.__new__(UyapDownloaderApp)
+    app_helper.history = app_helper._verify_and_clean_history()
+    print(f"[✓] Kayıtlı ve diskte doğrulanmış evrak sayısı: {len(app_helper.history)} adet")
+
+    # 5. Tarih aralığını belirle
+    try:
+        end_d = dt.datetime.strptime(args.end_date.strip(), "%d.%m.%Y").date() if args.end_date else dt.date.today()
+    except ValueError:
+        end_d = dt.date.today()
+    try:
+        start_d = dt.datetime.strptime(args.start_date.strip(), "%d.%m.%Y").date() if args.start_date else (end_d - dt.timedelta(days=365))
+    except ValueError:
+        start_d = end_d - dt.timedelta(days=365)
+
+    print(f"[*] Tarama Aralığı: {start_d.strftime('%d.%m.%Y')} - {end_d.strftime('%d.%m.%Y')}")
+
+    chunk_days = max(7, args.chunk_days)
+    ranges = []
+    cur = start_d
+    while cur <= end_d:
+        nxt = min(cur + dt.timedelta(days=chunk_days - 1), end_d)
+        ranges.append((cur, nxt))
+        cur = nxt + dt.timedelta(days=1)
+
+    print(f"[*] İşlemlerim {len(ranges)} dilim halinde taranıyor...")
+    all_items = []
+    seen_keys = set()
+
+    for idx, (s_d, e_d) in enumerate(ranges, start=1):
+        s_str = s_d.strftime("%d.%m.%Y")
+        e_str = e_d.strftime("%d.%m.%Y")
+        resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
+
+        if not resp.get("ok") or resp.get("status") in (401, 403):
+            if auto_relogin and pin:
+                bridge.auto_relogin(pin=pin)
+                time.sleep(2.0)
+                resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
+
+        rows = resp.get("data")
+        if isinstance(rows, dict):
+            rows = rows.get("data") or rows.get("list") or []
+        if not isinstance(rows, list):
+            rows = []
+
+        chunk_added = 0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            evrak_id = str(r.get("evrakId") or "").strip()
+            gg_evrak_id = str(r.get("ggEvrakId") or "").strip()
+            is_emir_no = str(r.get("isEmirNo") or "").strip()
+
+            ukey = f"islem_{is_emir_no}" if is_emir_no else f"islem_{evrak_id}_{gg_evrak_id}"
+            if ukey in seen_keys:
+                continue
+            seen_keys.add(ukey)
+
+            parsed_date = (
+                parse_uyap_date(r.get("isEmirTarihi"))
+                or parse_uyap_date(r.get("birimEvrakTarihi"))
+                or s_d
+            )
+            birim_adi = str(r.get("birimAdi") or "Belirtilmemis_Birim").strip()
+            dosya_no = str(r.get("dosyaNo") or "DosyaNo_Yok").strip()
+            evrak_adi = str(r.get("name") or r.get("evrakTuru") or "Evrak").strip()
+            isin_durumu = str(r.get("isinDurumu") or "Tamamlandı").strip()
+
+            item = {
+                "unique_key": ukey,
+                "kaynak": "Islemlerim",
+                "tarih_obj": parsed_date,
+                "tarih": parsed_date.strftime("%Y-%m-%d"),
+                "yil": parsed_date.strftime("%Y"),
+                "yil_ay": parsed_date.strftime("%Y-%m"),
+                "dosya_turu": infer_dosya_turu(birim_adi),
+                "birim_adi": birim_adi,
+                "dosya_no": dosya_no,
+                "dosya_id": str(r.get("dosyaId") or ""),
+                "islem_turu": f"Gonderilen_Islem ({isin_durumu})",
+                "evrak_turu": evrak_adi,
+                "evrak_turu_kod": evrak_adi,
+                "evrak_adi": evrak_adi,
+                "evrak_id": evrak_id,
+                "gg_evrak_id": gg_evrak_id,
+                "is_emir_no": is_emir_no,
+                "download_params": {
+                    "evrakId": evrak_id,
+                    "gelenGidenEvrakId": gg_evrak_id,
+                },
+                "can_download": bool(evrak_id),
+            }
+            all_items.append(item)
+            chunk_added += 1
+
+        print(f"  [{idx}/{len(ranges)}] {s_str} - {e_str} -> {len(rows)} kayıt ({chunk_added} yeni)")
+        if idx < len(ranges):
+            time.sleep(random.uniform(1.8, 3.2))
+
+    print(f"\n[✓] Toplam {len(all_items)} işlem/evrak kaydı tarandı.")
+
+    # 6. Mükerrerlik Filtresi: Diskte sağlam olanları atla
+    download_queue = [
+        it for it in all_items if it["can_download"] and not app_helper.is_item_already_downloaded(it)
+    ]
+    skipped_count = len(all_items) - len(download_queue)
+
+    print("\n" + "=" * 70)
+    print(f"  TOPLAM BULUNAN İŞLEM : {len(all_items)} adet")
+    print(f"  DİSKTE MEVCUT (ATLANDI): {skipped_count} adet")
+    print(f"  İNDİRİLECEK YENİ EVRAK: {len(download_queue)} adet")
+    print("=" * 70 + "\n")
+
+    if not download_queue:
+        print("[✓] Tebrikler! Tüm evraklar zaten diskte sağlam ve eksiksiz mevcut. İndirilecek yeni evrak yok.")
+        return
+
+    # 7. Güvenli İndirme Döngüsü
+    min_d = 2.5
+    max_d = 5.5
+    batch_n = 15
+    batch_pause = 15.0
+    downloaded_now = 0
+    max_retries = 3
+
+    print(f"[*] Güvenli indirme başlatılıyor ({min_d}-{max_d} sn bekleme, her {batch_n} dosyada {batch_pause:.0f} sn mola)...")
+
+    for idx, item in enumerate(download_queue, start=1):
+        ukey = item["unique_key"]
+        success = False
+
+        for attempt in range(1, max_retries + 1):
+            resp = bridge.download_document(item["download_params"])
+            err_hdr = resp.get("errorHeader")
+            status_code = resp.get("status", 0)
+            ct = resp.get("contentType") or ""
+            raw_bytes = base64.b64decode(resp.get("base64") or "") if resp.get("base64") else b""
+
+            is_valid, reason = is_valid_document_bytes(raw_bytes, ct)
+            need_relogin = (
+                not resp.get("ok")
+                or status_code in (401, 403, 302, 500)
+                or bool(err_hdr)
+                or not is_valid
+            )
+
+            if need_relogin:
+                print(f"[!] UYARI: Evrak alınamadı ({item['evrak_adi']}) - {reason} [Deneme {attempt}/{max_retries}]")
+                if auto_relogin and pin and attempt < max_retries:
+                    print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
+                    re_ok, re_msg = bridge.auto_relogin(pin=pin)
+                    if re_ok:
+                        print(f"[✓] {re_msg}. Evrak tekrar deneniyor...")
+                        time.sleep(2.0)
+                        continue
+                    else:
+                        print(f"[x] Otomatik giriş başarısız: {re_msg}")
+                        time.sleep(3.0)
+                elif attempt < max_retries:
+                    print("[!] Lütfen UYAP oturumunuzu kontrol edin/yenileyin (Mobil İmza / e-İmza)...")
+                    time.sleep(5.0)
+                    continue
+
+            if is_valid:
+                cd = resp.get("contentDisposition") or ""
+                cd_filename = ""
+                m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^;"\']+)', cd, re.IGNORECASE)
+                if m:
+                    cd_filename = m.group(1).strip()
+
+                ext = guess_extension(cd_filename, ct, raw_bytes)
+
+                target_path = app_helper.build_target_filepath(item, ext, override_dir=download_dir)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                tmp_path = target_path.with_suffix(target_path.suffix + ".part")
+                tmp_path.write_bytes(raw_bytes)
+
+                if tmp_path.exists() and tmp_path.stat().st_size == len(raw_bytes):
+                    tmp_path.replace(target_path)
+                else:
+                    target_path.write_bytes(raw_bytes)
+                    tmp_path.unlink(missing_ok=True)
+
+                sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+                app_helper.history[ukey] = {
+                    "path": str(target_path),
+                    "sha256": sha256_hash,
+                    "downloaded_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "size": len(raw_bytes),
+                    "tarih": item["tarih"],
+                    "dosya_turu": item["dosya_turu"],
+                    "birim_adi": item["birim_adi"],
+                    "dosya_no": item["dosya_no"],
+                    "islem_turu": item["islem_turu"],
+                    "evrak_turu": item["evrak_turu"],
+                    "evrak_id": item["evrak_id"],
+                    "is_emir_no": item.get("is_emir_no", ""),
+                }
+                app_helper._save_history()
+                downloaded_now += 1
+                success = True
+
+                pct = (idx / len(download_queue)) * 100
+                bar = ("█" * int(pct // 5)).ljust(20, "░")
+                print(f"[{idx}/{len(download_queue)}] [{bar}] %{pct:.1f} Kaydedildi ({len(raw_bytes)//1024} KB): {item['birim_adi']} ({item['dosya_no']}) - {item['evrak_adi']}")
+                break
+
+        if not success:
+            print(f"[x] HATA: {item['evrak_adi']} ({ukey}) indirilemedi, atlandı.")
+
+        if idx < len(download_queue):
+            if downloaded_now > 0 and downloaded_now % batch_n == 0:
+                print(f"[*] UYAP koruma molası: {downloaded_now} dosya indirildi, {batch_pause:.0f} sn dinleniliyor...")
+                time.sleep(batch_pause)
+            else:
+                time.sleep(random.uniform(min_d, max_d))
+
+    # CSV İndeksi yaz
+    try:
+        csv_path = download_dir / "indirme_indeksi.csv"
+        with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow([
+                "Durum", "Tarih", "Dosya Türü", "Birim Adı", "Dosya No",
+                "İşlem Türü", "Evrak Türü", "Evrak ID", "Kaydedilen Dosya Yolu"
+            ])
+            for it in all_items:
+                ukey = it["unique_key"]
+                h = app_helper.history.get(ukey, {})
+                writer.writerow([
+                    "İndirildi" if h else "Bekliyor",
+                    it["tarih"],
+                    it["dosya_turu"],
+                    it["birim_adi"],
+                    it["dosya_no"],
+                    it["islem_turu"],
+                    it["evrak_turu"],
+                    it["evrak_id"],
+                    h.get("path", ""),
+                ])
+        print(f"[✓] CSV İndeksi kaydedildi: {csv_path}")
+    except Exception as e:
+        print(f"[!] CSV kaydedilemedi: {e}")
+
+    print("\n" + "=" * 70)
+    print(f"  İNDİRME TAMAMLANDI! Bu oturumda {downloaded_now} dosya eksiksiz indirildi.")
+    print(f"  Kayıt Konumu: {download_dir}")
+    print("=" * 70 + "\n")
+
+
 def main():
-    root = tk.Tk()
-    app = UyapDownloaderApp(root)
-    root.mainloop()
+    parser = argparse.ArgumentParser(description="UYAP Avukat Portal Güvenli Toplu Evrak İndirici")
+    parser.add_argument("--cli", "-c", action="store_true", help="Grafik arayüz (Tkinter) yerine Terminal / CLI modunda çalıştır")
+    parser.add_argument("--headless", action="store_true", help="Chromium'u arkaplanda (penceresiz / headless) çalıştır")
+    parser.add_argument("--port", type=int, default=CDP_PORT, help="Chromium CDP portu (varsayılan: 9223)")
+    parser.add_argument("--pin", type=str, default="", help="e-İmza PIN kodu (varsayılan: pin.txt veya boş)")
+    parser.add_argument("--start-date", type=str, default="", help="Başlangıç tarihi (GG.AA.YYYY)")
+    parser.add_argument("--end-date", type=str, default="", help="Bitiş tarihi (GG.AA.YYYY)")
+    parser.add_argument("--chunk-days", type=int, default=30, help="Sorgu dilim aralığı (gün)")
+    parser.add_argument("--dir", type=str, default="", help="İndirme klasörü")
+    parser.add_argument("--no-auto-relogin", action="store_true", help="Otomatik e-imza girişini devre dışı bırak")
+
+    args = parser.parse_args()
+
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    if args.cli or not has_display or not HAS_TKINTER:
+        if not HAS_TKINTER and not args.cli:
+            print("[i] Bilgi: Tkinter grafik modülü bulunamadı, otomatik olarak Terminal / CLI modunda başlatılıyor.")
+        elif not has_display and not args.cli:
+            print("[i] Bilgi: Ekran (DISPLAY/X11) bulunamadı, otomatik olarak Terminal / CLI modunda başlatılıyor.")
+        run_cli_mode(args)
+    else:
+        root = tk.Tk()
+        app = UyapDownloaderApp(root)
+        root.mainloop()
 
 
 if __name__ == "__main__":

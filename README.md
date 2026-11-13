@@ -1,83 +1,91 @@
 # UYAP Avukat Portal - Güvenli ve Kategorili Toplu Evrak İndirici
 
-UYAP Avukat Portal (`https://avukat.uyap.gov.tr`) üzerinden son 1 yılın (veya seçilen tarih aralığının) tüm işlemlerini ve dava evraklarını güvenli, kategorili ve kesintisiz şekilde indiren gelişmiş masaüstü otomasyon aracı.
+UYAP Avukat Portal (`https://avukat.uyap.gov.tr`) üzerinden son 1 yılın (veya seçilen tarih aralığının) tüm işlemlerini ve dava evraklarını güvenli, kategorili ve kesintisiz şekilde indiren gelişmiş otomasyon aracı.
+
+Masaüstü Linux/macOS sistemlerinin yanı sıra **Android (Termux)** üzerinde hem **Terminal (CLI)**, hem **Headless**, hem de **Termux:X11** grafik arayüzü ile eksiksiz çalışır.
 
 ---
 
 ## 🚀 Öne Çıkan Özellikler
 
-1. **Chromium CDP Entegrasyonu (Port 9223):**
-   * Chromium'u özel hata ayıklama moduyla başlatır veya açık olan UYAP sekmesine otomatik bağlanır.
-   * UYAP'ın dahili React SPA mimarisi ve session cookie'leri üzerinden güvenli şekilde çalışır.
+1. **Çoklu Çalışma Modları (Masaüstü GUI, Termux:X11, CLI & Headless):**
+   * **Pencereli Grafik Arayüz (Tkinter):** Masaüstü ortamlarında ve Android `Termux:X11` ile pencereli arayüz.
+   * **Terminal / CLI Modu (`--cli`):** Ekransız, grafik kartı gerektirmeyen, doğrudan terminalde canlı ilerleme çubuğuyla çalışan mod.
+   * **Headless Modu (`--headless`):** Chromium'u arkaplanda (penceresiz) çalıştırarak minimum kaynak tüketimi sağlar.
 
-2. **Otomatik e-İmza Yenileme & Oturum Kurtarma (ArkSigner Köprüsü):**
-   * Yerel ArkSigner servisi (`http://localhost:5975`) ile entegre çalışır.
-   * UYAP bağlantısı koptuğunda, oturum süresi dolduğunda veya hata aldığında kullanıcının PIN koduyla challenge imzalayarak oturumu arka planda otomatik yeniler ve indirmeye kesintisiz devam eder.
+2. **Esnek Kimlik Doğrulama (e-İmza & Mobil İmza Desteği):**
+   * **e-İmza Otomatik Yenileme:** Bilgisayarda ArkSigner (`localhost:5975`) üzerinden PIN ile kesintisiz otomatik oturum açma.
+   * **Mobil İmza / Manuel Giriş Bekleme:** ArkSigner bulunmayan ortamlarda (Android/Termux gibi) oturum düştüğünde program çökmek yerine kullanıcıdan Mobil İmza veya e-Devlet girişini bekler; giriş yapıldığı an indirmeye kaldığı yerden devam eder.
 
-3. **Sahte HTML / Hata Sayfası Koruması:**
-   * Oturum düşmesiyle dönen HTML giriş sayfalarını veya JSON hata mesajlarını ASLA UDF/PDF olarak kaydetmez.
-   * Sihirli baytlar (magic bytes) denetimi yapar; dosyaları önce `.part` geçici uzantısıyla yazar, doğrular ve atomik olarak asıl ismine taşır.
+3. **Tam Mükerrerlik ve Eksiklik Önleme (Kalıcı İş Emir No Mimarisi):**
+   * UYAP'ın sorgu bazlı dinamik şifrelediği geçici evrak kodları yerine kalıcı **İş Emir Numarası (`isEmirNo`)** ve içerik eşleşmesi kullanır.
+   * Diskte sağlam bulunan dosyaları anında atlar (sıfır kota kaybı). Sadece eksik veya silinmiş evrakları indirir.
 
-4. **Tam Mükerrerlik ve Eksiklik Önleme (İdempotent Mimari):**
-   * İndirilen dosyaların SHA-256 özetini ve diskteki gerçek dosya varlığını denetler.
-   * Daha önce başarıyla indirilmiş dosyaları otomatik atlar (mükerrer indirmeyi önler).
-   * Yarım kalan veya silinmiş dosyaları tespit ederek yalnızca eksik olanları indirir.
+4. **Sahte HTML / Hata Sayfası Koruması:**
+   * Oturum düşmesiyle dönen HTML sayfalarını veya JSON hata yanıtlarını asla UDF/PDF olarak kaydetmez.
+   * Dosyaları önce `.part` uzantısıyla kaydeder, doğrular ve atomik olarak asıl ismine taşır.
 
-5. **Akıllı Kategorilendirme ve Esnek Klasörleme:**
-   * Dosya/Yargı Türü (Ağır Ceza, Asliye Hukuk, İcra Dairesi vb.), Evrak Türü, İşlem Türü ve Tarihe göre filtreleme ve anlık arama imkanı sunar.
-   * Dinamik klasör şablonları (örn: `{dosya_turu}/{evrak_turu}/{islem_turu}/{yil_ay}/{dosya_no}_{evrak_adi}`).
+5. **UYAP Koruma Sistemi (Anti-Ban & Anti-Flood):**
+   * Seri indirme, rastgele jitter beklemesi (2.5 - 6.0 sn) ve her N dosyada dinlenme molası verir.
 
-6. **UYAP Koruma Sistemi (Anti-Ban & Anti-Flood):**
-   * Seri indirme, rastgele bekleme (jitter) süresi (varsayılan 3.5 - 7.0 sn) ve her N dosyada bir koruma molası verir.
-
-7. **Rotasyonlu Metin Günlüğü (Rotating TXT Logger):**
+6. **Rotasyonlu Metin Günlüğü (Rotating TXT Logger):**
    * `uyap_indirici_log.txt` dosyasına sürekli ve anlık yazar.
-   * Dosya boyutu 8 MB sınırına ulaştığında yeni dosyaya geçer (maksimum 3 yedek tutar). Editörlerde kasmaz ve sistemde dosya kirliliği yaratmaz.
+   * Dosya boyutu 8 MB sınırına ulaştığında yeni dosyaya geçer (maksimum 3 yedek tutar).
 
 ---
 
-## 📦 Kurulum ve Gereksinimler
+## 📱 Android / Termux Kurulumu ve Kullanımı
 
-* **Python:** 3.10 veya üzeri
-* **İşletim Sistemi:** Linux (Fedora, Ubuntu, Debian, Arch vb.) veya macOS
-* **Bağımlılıklar:**
-  ```bash
-  pip install -r requirements.txt
-  ```
-  *(Sistemde Python Tkinter kurulu olmalıdır: `sudo dnf install python3-tkinter` veya `sudo apt install python3-tk`)*
-* **Tarayıcı:** Chromium veya Google Chrome
-* **e-İmza Sürücüsü:** Bilgisayarınızda e-İmza kart okuyucunuzun ve ArkSigner uygulamasının çalışıyor olması gerekmektedir.
+Android cihazınızda UYAP'tan evrak indirmek için iki seçeneğiniz vardır:
+
+### 1. Hızlı Otomatik Kurulum:
+Termux uygulamasında şu komutu çalıştırmanız yeterlidir:
+```bash
+bash termux_kurulum.sh
+```
+
+### 2. Çalıştırma Seçenekleri:
+Kurulumdan sonra başlatıcıyı çalıştırın:
+```bash
+./baslat_termux.sh
+```
+Açılan menüden dilediğiniz modu seçebilirsiniz:
+* **Seçenek 1 (Terminal / CLI Modu - Önerilen):** Ekran veya X11 açmadan, doğrudan Termux siyah ekranında canlı ilerleme çubuğuyla çalışır.
+* **Seçenek 2 (Termux:X11 Grafik Arayüzü):** Telefonunuzda masaüstü penceresi açılır.
+* **Seçenek 3 (Headless Modu):** Chromium'u tamamen arkaplanda çalıştırır.
+
+> [!TIP]
+> **Android İndirme Konumu:** Android/Termux üzerinde indirilen evraklar doğrudan telefonunuzun dahili hafızasındaki **`İndirilenler/UYAP_Indirilenler`** (`/sdcard/Download/UYAP_Indirilenler`) klasörüne kaydedilir. Dosya yöneticinizden hemen açabilirsiniz.
 
 ---
 
-## 🛠️ Kullanım
+## 💻 Masaüstü Kurulumu (Linux / macOS)
 
-Uygulamayı başlatmak için:
+### Gereksinimler:
+* Python 3.10 veya üzeri
+* Chromium veya Google Chrome
+* ArkSigner (e-İmza ile otomatik yenileme için)
 
+### Bağımlılıklar:
+```bash
+pip install -r requirements.txt
+```
+
+### Başlatma:
 ```bash
 ./baslat.sh
 ```
-
-veya
-
+veya doğrudan CLI/Headless başlatmak için:
 ```bash
-python3 uyap_indirici.py
+python3 uyap_indirici.py --cli --headless
 ```
-
-### Adım Adım İşlem Sırası:
-
-1. **Chromium'u Başlatın:** `1. Chromium ile UYAP'ı Aç` butonuna basın.
-2. **e-İmza ile Giriş:** e-İmza PIN kodunuzu girip `e-İmza ile Giriş Yap / Yenile` butonuna basın veya tarayıcıdan giriş yapın.
-3. **İşlemleri Tarayın:** Tarih aralığını belirleyip `3. İşlemlerim'i Tara` butonuna basın.
-4. **Filtreleyin ve Klasör Şablonunu Seçin:** İstediğiniz mahkeme türü, evrak türü veya arama kelimesini seçin.
-5. **Güvenli İndirmeyi Başlatın:** `Filtrelenen Tüm Evrakları Güvenli İndir` butonuna basarak arkanıza yaslanın.
 
 ---
 
 ## 🔒 Gizlilik ve Güvenlik
 
-* Bu yazılım hiçbir verinizi veya dosyanızı üçüncü taraf sunuculara göndermez. Tüm iletişim doğrudan yerel bilgisayarınız (`localhost`) ile Adalet Bakanlığı UYAP sunucuları (`avukat.uyap.gov.tr`) arasında gerçekleşir.
-* e-İmza PIN kodu ve indirilen dava evrakları `.gitignore` kapsamında tutulmakta olup kesinlikle versiyon kontrolüne dahil edilmez.
+* Bu yazılım hiçbir verinizi üçüncü taraf sunuculara göndermez. Tüm iletişim doğrudan yerel cihazınız ile Adalet Bakanlığı UYAP sunucuları (`avukat.uyap.gov.tr`) arasında gerçekleşir.
+* e-İmza PIN kodunuz ve indirilen dava evrakları `.gitignore` kapsamında korunur ve repoya dahil edilmez.
 
 ---
 
