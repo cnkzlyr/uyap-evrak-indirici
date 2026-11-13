@@ -686,6 +686,7 @@ class UyapDownloaderApp:
     def _verify_and_clean_history(self) -> dict:
         """
         Geçmişteki kayıtları diskteki fiziksel dosyalarla karşılaştırır:
+        - Eski dinamik anahtarları kalıcı islem_{is_emir_no} formatına standardize eder.
         - Dosya diskte yoksa veya boyutu < 128 / HTML ise geçmişten siler (tekrar indirilebilsin diye).
         - Böylece eksik evrak kalmaz ve mükerrerlik %100 önlenir.
         """
@@ -713,22 +714,77 @@ class UyapDownloaderApp:
                 if b"<html" in head or b"<!doctype html" in head:
                     fp.unlink(missing_ok=True)
                     continue
-                cleaned[k] = v
+
+                # Anahtarı kalıcı işlem numarasıyla (is_emir_no) standardize et
+                emir = str(v.get("is_emir_no") or "").strip()
+                if not emir and "_" in k:
+                    parts = k.split("_")
+                    if len(parts) >= 2 and parts[-1].isdigit():
+                        emir = parts[-1]
+                v["is_emir_no"] = emir
+                stable_k = f"islem_{emir}" if emir else k
+                cleaned[stable_k] = v
             except Exception:
                 continue
 
-        if len(cleaned) != len(raw):
-            try:
-                HISTORY_FILE.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+        try:
+            HISTORY_FILE.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
         return cleaned
 
-    def is_item_already_downloaded(self, ukey: str) -> bool:
-        """Bir evrakın hem geçmişte hem de diskte sağlam bir şekilde bulunup bulunmadığını denetler."""
-        if ukey not in self.history:
+    def is_item_already_downloaded(self, item_or_key) -> bool:
+        """
+        Bir evrakın hem geçmişte hem de diskte sağlam bir şekilde bulunup bulunmadığını denetler.
+        UYAP evrakId'yi dinamik şifrelese bile:
+        1. is_emir_no eşleşmesi (kalıcı işlem no)
+        2. unique_key eşleşmesi
+        3. (birim_adi, dosya_no, tarih, evrak_adi) içerik eşleşmesi
+        4. Diskteki fiziksel dosya varlığı ve boyutu (> 128 bayt)
+        ile tam mükerrerlik denetimi yapar.
+        """
+        if isinstance(item_or_key, dict):
+            item = item_or_key
+            ukey = item.get("unique_key", "")
+            is_emir = str(item.get("is_emir_no") or "").strip()
+        else:
+            ukey = str(item_or_key)
+            is_emir = ukey.split("_")[-1] if ukey.startswith("islem_") else ""
+            item = {}
+
+        entry = None
+        # 1. Doğrudan ukey eşleşmesi
+        if ukey and ukey in self.history:
+            entry = self.history[ukey]
+        # 2. is_emir_no eşleşmesi (örn: islem_18313320805)
+        elif is_emir and f"islem_{is_emir}" in self.history:
+            entry = self.history[f"islem_{is_emir}"]
+        # 3. Geçmişteki is_emir_no alanları arasında ara
+        elif is_emir:
+            for h in self.history.values():
+                if str(h.get("is_emir_no") or "").strip() == is_emir:
+                    entry = h
+                    break
+
+        # 4. Alternatif eşleşme: Birim adı, dosya no, tarih ve evrak adı birebir aynı mı?
+        if not entry and item:
+            b_adi = item.get("birim_adi")
+            d_no = item.get("dosya_no")
+            e_adi = item.get("evrak_adi")
+            tarih = item.get("tarih")
+            for h in self.history.values():
+                if (
+                    h.get("birim_adi") == b_adi
+                    and h.get("dosya_no") == d_no
+                    and h.get("evrak_turu") == e_adi
+                    and h.get("tarih") == tarih
+                ):
+                    entry = h
+                    break
+
+        if not entry:
             return False
-        entry = self.history[ukey]
+
         path_str = entry.get("path")
         if not path_str:
             return False
@@ -1221,7 +1277,11 @@ class UyapDownloaderApp:
                         evrak_id = str(r.get("evrakId") or "").strip()
                         gg_evrak_id = str(r.get("ggEvrakId") or "").strip()
                         is_emir_no = str(r.get("isEmirNo") or "").strip()
-                        ukey = f"islem_{evrak_id}_{gg_evrak_id}_{is_emir_no}"
+                        # UYAP evrakId'yi her sorguda dinamik şifreler; sabit ve kalıcı kimlik is_emir_no'dur
+                        if is_emir_no:
+                            ukey = f"islem_{is_emir_no}"
+                        else:
+                            ukey = f"islem_{evrak_id}_{gg_evrak_id}"
                         if ukey in seen_keys:
                             continue
                         seen_keys.add(ukey)
@@ -1430,7 +1490,7 @@ class UyapDownloaderApp:
             ukey = it["unique_key"]
             if not it["can_download"]:
                 status = "İndirilemez (ID Yok)"
-            elif self.is_item_already_downloaded(ukey):
+            elif self.is_item_already_downloaded(it):
                 status = "İndirildi"
             else:
                 status = "Bekliyor"
@@ -1519,13 +1579,20 @@ class UyapDownloaderApp:
         skip_done = self.var_skip_downloaded.get()
         # Mükerrerlik ve eksiklik kontrolü: Sadece fiziksel dosyası tam olanları atla
         download_queue = [
-            it for it in queue if it["can_download"] and (not skip_done or not self.is_item_already_downloaded(it["unique_key"]))
+            it for it in queue if it["can_download"] and (not skip_done or not self.is_item_already_downloaded(it))
         ]
+
+        skipped_count = len(queue) - len(download_queue)
+        if skip_done and skipped_count > 0:
+            self.log(
+                f"MÜKERRERLİK KORUMASI: Daha önce başarıyla indirilmiş {skipped_count} evrak atlandı. "
+                f"Sadece kalan {len(download_queue)} eksik evrak için indirme başlatılıyor."
+            )
 
         if not download_queue:
             messagebox.showinfo(
-                "İndirilecek Evrak Yok",
-                "Seçili kriterlere uygun yeni indirilecek evrak bulunmuyor.\n(Tüm evraklar diskte sağlam ve eksiksiz mevcut)."
+                "Tümü İndirilmiş",
+                f"Seçili kriterlere uygun {len(queue)} evrakın tamamı daha önce indirilmiş ve diskte sağlam olarak mevcuttur.\n\nHiçbir evrak tekrar indirilmeyecektir."
             )
             return
 
@@ -1641,6 +1708,7 @@ class UyapDownloaderApp:
                                 "islem_turu": item["islem_turu"],
                                 "evrak_turu": item["evrak_turu"],
                                 "evrak_id": item["evrak_id"],
+                                "is_emir_no": item.get("is_emir_no", ""),
                             }
                             self._save_history()
                             downloaded_now += 1
