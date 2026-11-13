@@ -935,6 +935,25 @@ class UyapBrowserBridge:
         """
         return self.eval_js(js, timeout=90.0) or []
 
+    def query_durusmalar(self, start_date_str: str, end_date_str: str) -> list:
+        """avukat_durusma_sorgula_brd.ajx ile belirli tarih aralığındaki duruşmaları çeker."""
+        js = f"""
+        (async () => {{
+            const resp = await fetch("/avukat_durusma_sorgula_brd.ajx", {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json", "Cache-Control": "no-cache"}},
+                body: JSON.stringify({{
+                    baslangicTarihi: {json.dumps(start_date_str)},
+                    bitisTarihi: {json.dumps(end_date_str)}
+                }})
+            }});
+            if (!resp.ok) return [];
+            const d = await resp.json();
+            return Array.isArray(d) ? d : (d && Array.isArray(d.data) ? d.data : []);
+        }})()
+        """
+        return self.eval_js(js, timeout=30.0) or []
+
     def download_document(self, params: dict) -> dict:
         """download_document_brd.uyap üzerinden tek bir evrakı indirir ve base64 olarak döndürür."""
         qs = urlencode({k: v for k, v in params.items() if v is not None and v != ""})
@@ -1701,8 +1720,8 @@ class UyapDownloaderApp:
                 for idx, c in enumerate(cases, start=1):
                     if self.stop_requested:
                         break
-                    dosya_id = str(c.get("dosyaId") or "").strip()
-                    dosya_no = str(c.get("dosyaNo") or "").strip()
+                    dosya_id = str(c.get("dosyaID") or c.get("dosyaId") or "").strip()
+                    dosya_no = str(c.get("dosyaNO") or c.get("dosyaNo") or "").strip()
                     birim_adi = str(c.get("birimAdi") or c.get("mahkemeAdi") or "").strip()
                     explicit_tur = str(c.get("dosyaTurAciklama") or c.get("dosyaTuru") or "").strip()
                     if not dosya_id:
@@ -1758,10 +1777,15 @@ class UyapDownloaderApp:
 
                     for p in pages:
                         if isinstance(p, dict):
-                            for k, v in p.items():
-                                if isinstance(v, list):
-                                    for ev in v:
-                                        collect_evrak(ev)
+                            tum = p.get("tumEvraklar") or p
+                            if isinstance(tum, dict):
+                                for sub_k, sub_v in tum.items():
+                                    if isinstance(sub_v, list):
+                                        for ev in sub_v:
+                                            collect_evrak(ev)
+                            elif isinstance(tum, list):
+                                for ev in tum:
+                                    collect_evrak(ev)
                         elif isinstance(p, list):
                             for ev in p:
                                 collect_evrak(ev)
@@ -2192,6 +2216,473 @@ class UyapDownloaderApp:
         self.log(f"Liste dışa aktarıldı: {path}")
 
 
+def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
+    """
+    Dava Dosyalarından Belirli Evrak Türlerini (Duruşma Tutanağı, Bilirkişi Raporu, Karar vb.)
+    ve eklerini toplu olarak indiren CLI fonksiyonu.
+    """
+    print("\n" + "=" * 70)
+    print("  UYAP Avukat Portal - Dava Dosyalarından Evrak İndirici (CLI)")
+    print("=" * 70 + "\n")
+
+    evrak_filter = getattr(args, "evrak_turu", "").strip().lower()
+    include_attachments = getattr(args, "include_attachments", False)
+
+    if not evrak_filter:
+        print("[*] İndirmek istediğiniz evrak türünü seçiniz:")
+        print("  1) Duruşma Tutanakları / Zabıtları (Önerilen)")
+        print("  2) Bilirkişi Raporları")
+        print("  3) Gerekçeli Karar ve Hükümler")
+        print("  4) Tensip Zaptı")
+        print("  5) Tüm Evraklar ve Ekleri")
+        print("  6) Özel Kelime Arama (Serbest Metin)")
+        print("-" * 50)
+        try:
+            sec = input("Seçiminiz (1-6) [Varsayılan: 1]: ").strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            sec = "1"
+
+        if sec == "1":
+            evrak_filter = "durusma"
+        elif sec == "2":
+            evrak_filter = "bilirkisi"
+        elif sec == "3":
+            evrak_filter = "karar"
+        elif sec == "4":
+            evrak_filter = "tensip"
+        elif sec == "5":
+            evrak_filter = "tumu"
+            include_attachments = True
+        elif sec == "6":
+            try:
+                evrak_filter = input("Aramak istediğiniz evrak türü / kelime: ").strip().lower()
+            except Exception:
+                evrak_filter = "tumu"
+        else:
+            evrak_filter = "durusma"
+
+    filter_desc = {
+        "durusma": "Duruşma Tutanakları (Zabıtlar)",
+        "bilirkisi": "Bilirkişi Raporları",
+        "karar": "Gerekçeli Karar ve Hükümler",
+        "tensip": "Tensip Zaptı",
+        "tumu": "Tüm Evraklar ve Ek Belgeler",
+    }.get(evrak_filter, f"'{evrak_filter}' içeren evraklar")
+
+    print(f"\n[*] Hedef Evrak Türü: {filter_desc}")
+
+    print("[*] UYAP portalınızdaki aktif dava dosyaları sorgulanıyor...")
+    cases = bridge.query_sik_kullanilan_dosyalar()
+    if not cases:
+        print("[!] UYAP'ta dosya listesi alınamadı veya oturum kapalı.")
+        return
+
+    print(f"[✓] Toplam {len(cases)} adet aktif dosya tespit edildi.")
+    print("[*] Dosyaların evrak listeleri taranıyor...\n")
+
+    found_documents = []
+    seen_keys = set()
+
+    def matches_filter(tur_name):
+        if not tur_name:
+            return False
+        tn = str(tur_name).lower()
+        if evrak_filter in ("tumu", "all", "*"):
+            return True
+        if evrak_filter == "durusma":
+            return any(k in tn for k in ("duruşma", "durusma", "zapt", "zabit", "tutanak"))
+        if evrak_filter == "bilirkisi":
+            return any(k in tn for k in ("bilirkişi", "bilirkisi", "rapor"))
+        if evrak_filter == "karar":
+            return any(k in tn for k in ("karar", "gerekçeli", "gerekceli", "hüküm", "hukum"))
+        if evrak_filter == "tensip":
+            return "tensip" in tn
+        return evrak_filter in tn
+
+    for c_idx, c in enumerate(cases, start=1):
+        dosya_id = str(c.get("dosyaID") or c.get("dosyaId") or "").strip()
+        dosya_no = str(c.get("dosyaNO") or c.get("dosyaNo") or "DosyaNo_Yok").strip()
+        birim_adi = str(c.get("birimAdi") or c.get("mahkemeAdi") or "Mahkeme").strip()
+        if not dosya_id:
+            continue
+
+        print(f"  [{c_idx}/{len(cases)}] {birim_adi} ({dosya_no}) taranıyor...", end="", flush=True)
+        try:
+            pages = bridge.query_dosya_evraklar(dosya_id)
+        except Exception as e:
+            print(f" -> Hata: {e}")
+            continue
+
+        case_found = 0
+
+        def collect_doc(ev, is_attachment=False, parent_tur=""):
+            nonlocal case_found
+            if not isinstance(ev, dict):
+                return
+            ev_id = str(ev.get("evrakId") or "").strip()
+            if not ev_id:
+                return
+
+            tur = str(ev.get("ekTuru") if is_attachment else (ev.get("tur") or ev.get("aciklama") or "Evrak")).strip()
+            if not (matches_filter(tur) or (is_attachment and include_attachments and matches_filter(parent_tur))):
+                for ek in ev.get("ekEvrakListesi") or []:
+                    collect_doc(ek, is_attachment=True, parent_tur=tur)
+                return
+
+            p_date = (
+                parse_uyap_date(ev.get("onaylandigiTarih"))
+                or parse_uyap_date(ev.get("sistemeGonderildigiTarih"))
+                or dt.date.today()
+            )
+
+            if getattr(args, "start_date", None):
+                try:
+                    s_limit = dt.datetime.strptime(args.start_date, "%d.%m.%Y").date()
+                    if p_date < s_limit:
+                        return
+                except Exception:
+                    pass
+            if getattr(args, "end_date", None):
+                try:
+                    e_limit = dt.datetime.strptime(args.end_date, "%d.%m.%Y").date()
+                    if p_date > e_limit:
+                        return
+                except Exception:
+                    pass
+
+            ukey = f"dosya_{dosya_id}_{ev_id}"
+            if ukey in seen_keys:
+                return
+            seen_keys.add(ukey)
+
+            item = {
+                "unique_key": ukey,
+                "kaynak": "Dava_Dosyasi",
+                "tarih_obj": p_date,
+                "tarih": p_date.strftime("%Y-%m-%d"),
+                "yil": p_date.strftime("%Y"),
+                "yil_ay": p_date.strftime("%Y-%m"),
+                "dosya_turu": infer_dosya_turu(birim_adi),
+                "birim_adi": birim_adi,
+                "dosya_no": dosya_no,
+                "dosya_id": dosya_id,
+                "islem_turu": "Dava_Evraki_Ek" if is_attachment else "Dava_Evraki",
+                "evrak_turu": tur,
+                "evrak_turu_kod": tur,
+                "evrak_adi": f"EK_{tur}" if is_attachment else tur,
+                "evrak_id": ev_id,
+                "gg_evrak_id": str(ev.get("ggEvrakId") or ""),
+                "is_emir_no": str(ev.get("birimEvrakNo") or ev.get("anaEvrakId") or ""),
+                "is_attachment": is_attachment,
+                "download_params": {
+                    "dosyaId": dosya_id,
+                    "evrakId": ev_id,
+                },
+                "can_download": True,
+            }
+            found_documents.append(item)
+            case_found += 1
+
+            for ek in ev.get("ekEvrakListesi") or []:
+                collect_doc(ek, is_attachment=True, parent_tur=tur)
+
+        for p in pages:
+            if isinstance(p, dict):
+                tum = p.get("tumEvraklar") or p
+                if isinstance(tum, dict):
+                    for sub_k, sub_v in tum.items():
+                        if isinstance(sub_v, list):
+                            for ev in sub_v:
+                                collect_doc(ev)
+                elif isinstance(tum, list):
+                    for ev in tum:
+                        collect_doc(ev)
+            elif isinstance(p, list):
+                for ev in p:
+                    collect_doc(ev)
+
+        print(f" -> {case_found} evrak bulundu.")
+        if c_idx < len(cases):
+            time.sleep(random.uniform(0.3, 0.6))
+
+    print("\n" + "=" * 70)
+    print(f"  TOPLAM BULUNAN HEDEF EVRAK : {len(found_documents)} adet")
+
+    download_queue = [
+        it for it in found_documents if not app_helper.is_item_already_downloaded(it)
+    ]
+    skipped_count = len(found_documents) - len(download_queue)
+    print(f"  DİSKTE MEVCUT (ATLANDI)    : {skipped_count} adet")
+    print(f"  İNDİRİLECEK YENİ EVRAK     : {len(download_queue)} adet")
+    print("=" * 70 + "\n")
+
+    if not download_queue:
+        print("[✓] Tebrikler! Hedef evrakların tamamı zaten diskte sağlam olarak mevcut.")
+        return
+
+    min_d = 1.2
+    max_d = 2.8
+    batch_n = 20
+    batch_pause = 10.0
+    downloaded_now = 0
+    max_retries = 3
+
+    print(f"[*] Güvenli hızlı indirme başlatılıyor ({min_d}-{max_d} sn bekleme, her {batch_n} dosyada {batch_pause:.0f} sn mola)...")
+
+    sub_folder_name = "DURUSMA_TUTANAKLARI" if evrak_filter == "durusma" else (
+        "BILIRKISI_RAPORLARI" if evrak_filter == "bilirkisi" else (
+            "GEREKCELI_KARARLAR" if evrak_filter == "karar" else (
+                "TENSIP_ZAPITLARI" if evrak_filter == "tensip" else "DAVA_EVRAKLARI"
+            )
+        )
+    )
+    target_base = download_dir / sub_folder_name
+    target_base.mkdir(parents=True, exist_ok=True)
+
+    for idx, item in enumerate(download_queue, start=1):
+        ukey = item["unique_key"]
+        success = False
+
+        for attempt in range(1, max_retries + 1):
+            resp = bridge.download_document(item["download_params"])
+            err_hdr = resp.get("errorHeader")
+            status_code = resp.get("status", 0)
+            ct = resp.get("contentType") or ""
+            raw_bytes = base64.b64decode(resp.get("base64") or "") if resp.get("base64") else b""
+
+            is_valid, reason = is_valid_document_bytes(raw_bytes, ct)
+            need_relogin = (
+                not resp.get("ok")
+                or status_code in (401, 403, 302, 500)
+                or bool(err_hdr)
+                or not is_valid
+            )
+
+            if need_relogin:
+                chk = bridge.check_login_and_user()
+                usr_info = chk.get("user") or {}
+                has_active_session = bool(usr_info.get("tcKimlikNo") or usr_info.get("tckn"))
+                if has_active_session and status_code not in (401, 403):
+                    print(f"[-] BİLGİ: {item['evrak_adi']} ({item['birim_adi']}) sunucuda dosya olarak bulunamadı. Atlandı.")
+                    break
+
+                cfg = load_user_config()
+                c_tc = cfg.get("tc", tckn)
+                c_gsm = cfg.get("gsm", "")
+                c_op = cfg.get("operator", "2")
+                if c_tc and c_gsm:
+                    print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
+                    m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
+                    if m_ok:
+                        print(f"[✓] {m_msg}. Evrak tekrar deneniyor...")
+                        continue
+                time.sleep(3.0)
+                continue
+
+            if is_valid:
+                cd = resp.get("contentDisposition") or ""
+                cd_filename = ""
+                m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^;"\']+)', cd, re.IGNORECASE)
+                if m:
+                    cd_filename = m.group(1).strip()
+                ext = guess_extension(cd_filename, ct, raw_bytes)
+
+                b_slug = slugify_filename(item["birim_adi"])
+                d_slug = slugify_filename(item["dosya_no"])
+                e_slug = slugify_filename(item["evrak_adi"])
+                file_name = f"{item['tarih']}_{b_slug}_{d_slug}_{e_slug}.{ext}"
+                target_path = target_base / b_slug / d_slug / file_name
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                target_path.write_bytes(raw_bytes)
+                sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+                app_helper.history[ukey] = {
+                    "path": str(target_path),
+                    "sha256": sha256_hash,
+                    "downloaded_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "size": len(raw_bytes),
+                    "tarih": item["tarih"],
+                    "dosya_turu": item["dosya_turu"],
+                    "birim_adi": item["birim_adi"],
+                    "dosya_no": item["dosya_no"],
+                    "islem_turu": item["islem_turu"],
+                    "evrak_turu": item["evrak_turu"],
+                    "evrak_id": item["evrak_id"],
+                    "is_emir_no": item.get("is_emir_no", ""),
+                }
+                app_helper._save_history()
+                downloaded_now += 1
+                success = True
+
+                pct = (idx / len(download_queue)) * 100
+                bar = ("█" * int(pct // 5)).ljust(20, "░")
+                print(f"[{idx}/{len(download_queue)}] [{bar}] %{pct:.1f} Kaydedildi ({len(raw_bytes)//1024} KB): {item['birim_adi']} ({item['dosya_no']}) - {item['evrak_adi']}")
+                break
+
+        if not success:
+            print(f"[x] HATA: {item['evrak_adi']} ({ukey}) indirilemedi, atlandı.")
+
+        if idx < len(download_queue):
+            if downloaded_now > 0 and downloaded_now % batch_n == 0:
+                print(f"[*] UYAP koruma molası: {downloaded_now} dosya indirildi, {batch_pause:.0f} sn dinleniliyor...")
+                time.sleep(batch_pause)
+            else:
+                time.sleep(random.uniform(min_d, max_d))
+
+    print("\n" + "=" * 70)
+    print(f"  İNDİRME TAMAMLANDI! Bu oturumda {downloaded_now} dosya eksiksiz indirildi.")
+    print(f"  Kayıt Konumu: {target_base}")
+    print("=" * 70 + "\n")
+
+
+def run_cli_durusmalar_mode(args, bridge, app_helper, download_dir, tckn):
+    """
+    Duruşmaları sorgulayıp Google / Android Takvim için .ics dosyası üreten
+    ve duruşma listesini CSV olarak kaydeden CLI fonksiyonu.
+    """
+    print("\n" + "=" * 70)
+    print("  UYAP Avukat Portal - Duruşma Takvimi & Tutanak Yöneticisi")
+    print("=" * 70 + "\n")
+
+    today = dt.date.today()
+    s_date = today - dt.timedelta(days=90)
+    e_date = today + dt.timedelta(days=180)
+
+    if getattr(args, "start_date", None):
+        try:
+            s_date = dt.datetime.strptime(args.start_date, "%d.%m.%Y").date()
+        except Exception:
+            pass
+    if getattr(args, "end_date", None):
+        try:
+            e_date = dt.datetime.strptime(args.end_date, "%d.%m.%Y").date()
+        except Exception:
+            pass
+
+    print(f"[*] Duruşma Tarama Aralığı: {s_date.strftime('%d.%m.%Y')} - {e_date.strftime('%d.%m.%Y')}")
+
+    ranges = []
+    cur = s_date
+    while cur <= e_date:
+        nxt = min(cur + dt.timedelta(days=29), e_date)
+        ranges.append((cur, nxt))
+        cur = nxt + dt.timedelta(days=1)
+
+    print(f"[*] {len(ranges)} dilim halinde duruşmalar taranıyor...")
+    all_durusmalar = []
+    seen_ids = set()
+
+    for idx, (s_d, e_d) in enumerate(ranges, start=1):
+        s_str = s_d.strftime("%d.%m.%Y")
+        e_str = e_d.strftime("%d.%m.%Y")
+        try:
+            res = bridge.query_durusmalar(s_str, e_str)
+        except Exception:
+            res = []
+        c_count = 0
+        for d in res:
+            k_id = d.get("kayitId")
+            if k_id and k_id not in seen_ids:
+                seen_ids.add(k_id)
+                all_durusmalar.append(d)
+                c_count += 1
+        print(f"  [{idx}/{len(ranges)}] {s_str} - {e_str} -> {c_count} duruşma bulundu.")
+        if idx < len(ranges):
+            time.sleep(random.uniform(0.3, 0.6))
+
+    print(f"\n[✓] Toplam {len(all_durusmalar)} adet duruşma kaydı tespit edildi.")
+
+    if not all_durusmalar:
+        print("[i] Belirtilen tarih aralığında duruşma kaydı bulunamadı.")
+        return
+
+    # 1. iCalendar (.ics) Dosyası Üret
+    ics_lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//UYAP Avukat Portal//Duruşma Takvimi//TR",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:UYAP Duruşmaları",
+        "X-WR-TIMEZONE:Europe/Istanbul",
+    ]
+
+    for d in all_durusmalar:
+        k_id = d.get("kayitId", random.randint(100000, 999999))
+        ts_str = str(d.get("tarihSaat") or "").strip()
+        yerel_birim = str(d.get("yerelBirimAd") or "Mahkeme").strip()
+        dosya_no = str(d.get("dosyaNo") or "").strip()
+        islem_tur = str(d.get("islemTuruAciklama") or "Duruşma").strip()
+        islem_sonuc = str(d.get("islemSonucuAciklama") or "").strip()
+        token = str(d.get("token") or "").strip()
+        taraflar = d.get("dosyaTaraflari") or []
+        taraf_str = ", ".join([f"{t.get('isim','')} {t.get('soyad','')} ({t.get('sifat','')})" for t in taraflar if isinstance(t, dict)])
+
+        dt_start = None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt_start = dt.datetime.strptime(ts_str, fmt)
+                break
+            except Exception:
+                pass
+
+        if not dt_start:
+            continue
+
+        dt_end = dt_start + dt.timedelta(minutes=30)
+        dt_stamp = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        dt_start_s = dt_start.strftime("%Y%m%dT%H%M%S")
+        dt_end_s = dt_end.strftime("%Y%m%dT%H%M%S")
+
+        desc = f"Dosya: {dosya_no}\\nMahkeme: {yerel_birim}\\nİşlem: {islem_tur} ({islem_sonuc})"
+        if token:
+            desc += f"\\ne-Duruşma Linki: {token}"
+        if taraf_str:
+            desc += f"\\nTaraflar: {taraf_str}"
+
+        ics_lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:durusma_{k_id}@uyap.gov.tr",
+            f"DTSTAMP:{dt_stamp}",
+            f"DTSTART;TZID=Europe/Istanbul:{dt_start_s}",
+            f"DTEND;TZID=Europe/Istanbul:{dt_end_s}",
+            f"SUMMARY:{islem_tur}: {yerel_birim} ({dosya_no})",
+            f"DESCRIPTION:{desc}",
+            f"LOCATION:{yerel_birim}",
+            "STATUS:CONFIRMED",
+            "END:VEVENT",
+        ])
+
+    ics_lines.append("END:VCALENDAR")
+    ics_path = download_dir / "durusma_takvimi.ics"
+    ics_path.write_text("\r\n".join(ics_lines), encoding="utf-8")
+    print(f"\n[✓] Duruşma Takvimi Oluşturuldu: {ics_path}")
+    print("    (Bu dosyayı telefonunuzda açarak tüm duruşmaları Google Takvim / Telefon Takviminize tek tıkla ekleyebilirsiniz)\n")
+
+    # 2. CSV Çıktısı
+    csv_path = download_dir / "durusma_listesi.csv"
+    try:
+        with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["Tarih Saat", "Mahkeme / Birim", "Dosya No", "İşlem Türü", "Sonuç", "e-Duruşma Linki", "Taraflar"])
+            for d in all_durusmalar:
+                taraflar = d.get("dosyaTaraflari") or []
+                taraf_str = ", ".join([f"{t.get('isim','')} {t.get('soyad','')} ({t.get('sifat','')})" for t in taraflar if isinstance(t, dict)])
+                w.writerow([
+                    d.get("tarihSaat"),
+                    d.get("yerelBirimAd"),
+                    d.get("dosyaNo"),
+                    d.get("islemTuruAciklama"),
+                    d.get("islemSonucuAciklama"),
+                    d.get("token"),
+                    taraf_str,
+                ])
+        print(f"[✓] Duruşma Tablosu CSV olarak kaydedildi: {csv_path}\n")
+    except Exception:
+        pass
+
+
 def run_cli_mode(args):
     """
     Termux / Android / Konsol / Headless CLI Modu:
@@ -2342,6 +2833,13 @@ def run_cli_mode(args):
     app_helper = UyapDownloaderApp.__new__(UyapDownloaderApp)
     app_helper.history = app_helper._verify_and_clean_history()
     print(f"[✓] Kayıtlı ve diskte doğrulanmış evrak sayısı: {len(app_helper.history)} adet")
+
+    # Mod Seçimi Kontrolü
+    mode = getattr(args, "mode", "islemlerim")
+    if mode == "dosyalar":
+        return run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn)
+    elif mode == "durusmalar":
+        return run_cli_durusmalar_mode(args, bridge, app_helper, download_dir, tckn)
 
     # 5. Tarih aralığını belirle
     try:
@@ -2746,6 +3244,9 @@ def main():
     parser.add_argument("--gsm", type=str, default="", help="Mobil İmza için GSM Numarası (başında sıfır olmadan 10 hane)")
     parser.add_argument("--operator", type=str, default="", choices=["", "turktelekom", "turkcell", "vodafone", "1", "2", "3"], help="Mobil İmza operatörü (turktelekom, turkcell, vodafone)")
     parser.add_argument("--mobil-imza", action="store_true", help="Oturum yoksa doğrudan Mobil İmza akışını başlat")
+    parser.add_argument("--mode", type=str, default="islemlerim", choices=["islemlerim", "dosyalar", "durusmalar"], help="Çalışma modu: islemlerim, dosyalar (dava dosyası evrakları), durusmalar (duruşma takvimi)")
+    parser.add_argument("--evrak-turu", type=str, default="", help="Dava dosyalarından indirilecek evrak türü (durusma, bilirkisi, karar, tensip, tumu veya serbest arama)")
+    parser.add_argument("--include-attachments", action="store_true", help="Evrakların ek belgelerini de indir")
 
     args = parser.parse_args()
 
