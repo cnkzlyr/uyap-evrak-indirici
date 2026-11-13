@@ -626,27 +626,36 @@ class UyapBrowserBridge:
         # Adım 1: Mobil İmza giriş sayfasına geç
         js_nav = """
         (() => {
-            if (window.location.href.includes("giris.turkiye.gov.tr/Giris/Mobil-Imza")) {
-                return "already_on_page";
+            const href = window.location.href;
+            if (href.includes("giris.turkiye.gov.tr/Giris/Mobil-Imza")) {
+                return "already_on_mobil_imza";
+            }
+            if (!href.includes("avukat.uyap.gov.tr/giris")) {
+                window.location.href = "https://avukat.uyap.gov.tr/giris";
+                return "navigating_to_uyap_giris";
             }
             const arrow = document.querySelector(".edevlet-dropdown .dx-icon-spindown") || document.querySelector(".edevlet-dropdown");
             if (arrow) {
                 arrow.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
-                const item = [...document.querySelectorAll(".dx-overlay-content *")].find(e => e.innerText && e.innerText.trim() === "Mobil İmza İle Giriş");
+                const items = [...document.querySelectorAll(".dx-overlay-content *, .dx-list-item *")];
+                const item = items.find(e => e.innerText && e.innerText.trim().includes("Mobil İmza"));
                 if (item) {
                     item.click();
                     item.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
-                    return "clicked_dropdown";
+                    return "clicked_mobil_imza";
                 }
             }
-            window.location.href = "https://giris.turkiye.gov.tr/Giris/Mobil-Imza?oauthClientId=27e1dfc0-8536-11e4-b4a9-0800200c9a66&continue=" + encodeURIComponent("https://giris.turkiye.gov.tr/OAuth2AuthorizationServer/AuthorizationController?response_type=code&scope=Kimlik-Dogrula%3BAd-Soyad&redirect_uri=https%3A%2F%2Favukat.uyap.gov.tr%2Flogin.uyap&client_id=27e1dfc0-8536-11e4-b4a9-0800200c9a66&state=1879&loginTypeIndex=2");
-            return "navigated";
+            return "waiting_dropdown";
         })()
         """
-        try:
-            self.eval_js(js_nav, timeout=10.0)
-        except Exception:
-            pass
+        for _ in range(25):
+            try:
+                res = self.eval_js(js_nav, timeout=6.0)
+                if res == "already_on_mobil_imza":
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0)
 
         # Formun yüklenmesini bekle
         loaded = False
@@ -679,7 +688,7 @@ class UyapBrowserBridge:
                 op.checked = true;
                 op.dispatchEvent(new Event('change', {{bubbles: true}}));
             }}
-            const btn = document.querySelector('.btn-send') || document.getElementById('submitButton');
+            const btn = document.querySelector('.btn-send') || document.getElementById('submitButton') || document.querySelector('input[type="submit"]');
             if (btn) {{
                 btn.click();
                 return {{ok: true}};
@@ -699,10 +708,16 @@ class UyapBrowserBridge:
             if (err && err.innerText.trim()) {
                 return {error: err.innerText.trim()};
             }
-            const btn = document.querySelector('button[name="submitButton"]') || document.querySelector('.btn-send');
-            if (btn && (btn.innerText.includes("İmzala") || btn.value === "İmzala" || btn.innerText.includes("Devam"))) {
-                btn.click();
-                return {ok: true, clicked: "imzala"};
+            const btn = document.querySelector('button[name="submitButton"]') ||
+                        document.querySelector('input[name="submitButton"]') ||
+                        document.querySelector('input[type="submit"]') ||
+                        document.querySelector('.btn-send');
+            if (btn) {
+                const txt = (btn.innerText || btn.value || '').trim();
+                if (txt.includes("İmzala") || txt.includes("Devam")) {
+                    btn.click();
+                    return {ok: true, clicked: "imzala"};
+                }
             }
             return {waiting: true};
         })()
@@ -763,7 +778,10 @@ class UyapBrowserBridge:
         (() => {
             const url = window.location.href;
             // 1. OAuth onay ekranı geldi mi?
-            const oauthBtn = [...document.querySelectorAll('button')].find(b => (b.innerText && b.innerText.trim() === 'Onayla') || b.value === 'Onayla');
+            const oauthBtn = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn')].find(b => {
+                const txt = (b.innerText || b.value || '').trim();
+                return txt === 'Onayla' || txt.includes('Onayla');
+            });
             if (oauthBtn) {
                 oauthBtn.click();
                 return {status: "clicked_oauth_onayla"};
