@@ -379,42 +379,63 @@ class UyapBrowserBridge:
                 return t
         return pages[0] if pages else None
 
-    def eval_js(self, js_expression: str, timeout: float = 45.0):
+    def eval_js(self, js_expression: str, timeout: float = 90.0, retries: int = 2):
         """Tarayıcıdaki UYAP sekmesinde asenkron JS çalıştırır ve sonucunu döndürür."""
-        tab = self.get_uyap_tab()
-        if not tab or not tab.get("webSocketDebuggerUrl"):
-            raise RuntimeError("Açık bir UYAP tarayıcı sekmesi bulunamadı. Önce Chromium'u başlatın.")
+        last_err = None
+        for attempt in range(retries + 1):
+            tab = self.get_uyap_tab()
+            if not tab or not tab.get("webSocketDebuggerUrl"):
+                if attempt < retries:
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError("Açık bir UYAP tarayıcı sekmesi bulunamadı. Önce Chromium'u başlatın.")
 
-        ws_url = tab["webSocketDebuggerUrl"]
-        ws = websocket.create_connection(ws_url, timeout=timeout)
-        try:
-            msg_id = random.randint(1000, 999999)
-            payload = {
-                "id": msg_id,
-                "method": "Runtime.evaluate",
-                "params": {
-                    "expression": js_expression,
-                    "awaitPromise": True,
-                    "returnByValue": True,
-                },
-            }
-            ws.send(json.dumps(payload))
-            while True:
-                raw = ws.recv()
-                resp = json.loads(raw)
-                if resp.get("id") == msg_id:
-                    if "error" in resp:
-                        raise RuntimeError(f"CDP Hatası: {resp['error']}")
-                    res = resp.get("result", {})
-                    if "exceptionDetails" in res:
-                        exc = res["exceptionDetails"]
-                        raise RuntimeError(f"JS Hatası: {exc.get('text')} {exc.get('exception', {}).get('description', '')}")
-                    return res.get("result", {}).get("value")
-        finally:
+            ws_url = tab["webSocketDebuggerUrl"]
+            ws = None
             try:
-                ws.close()
-            except Exception:
-                pass
+                ws = websocket.create_connection(ws_url, timeout=timeout)
+                msg_id = random.randint(1000, 999999)
+                payload = {
+                    "id": msg_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": js_expression,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                    },
+                }
+                ws.send(json.dumps(payload))
+                while True:
+                    raw = ws.recv()
+                    resp = json.loads(raw)
+                    if resp.get("id") == msg_id:
+                        if "error" in resp:
+                            raise RuntimeError(f"CDP Hatası: {resp['error']}")
+                        res = resp.get("result", {})
+                        if "exceptionDetails" in res:
+                            exc = res["exceptionDetails"]
+                            raise RuntimeError(f"JS Hatası: {exc.get('text')} {exc.get('exception', {}).get('description', '')}")
+                        return res.get("result", {}).get("value")
+            except (websocket.WebSocketTimeoutException, TimeoutError) as e:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(2.5)
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(1.5)
+                    continue
+                raise
+            finally:
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+        if last_err:
+            raise last_err
 
     def auto_relogin(self, pin: str = DEFAULT_E_IMZA_PIN) -> tuple[bool, str]:
         """
@@ -659,8 +680,8 @@ class UyapBrowserBridge:
 
         # Formun yüklenmesini bekle
         loaded = False
-        for _ in range(25):
-            time.sleep(0.5)
+        for _ in range(40):
+            time.sleep(0.7)
             try:
                 check = self.eval_js("Boolean(document.getElementById('tridField') && document.getElementById('gsmField'))", timeout=5.0)
                 if check:
@@ -855,7 +876,10 @@ class UyapBrowserBridge:
             }};
         }})()
         """
-        return self.eval_js(js, timeout=45.0) or {}
+        try:
+            return self.eval_js(js, timeout=90.0, retries=2) or {}
+        except Exception as e:
+            return {"status": 500, "ok": False, "error": str(e), "rawText": str(e)}
 
     def query_sik_kullanilan_dosyalar(self) -> list:
         """Sık kullanılan dosyaları (avukat_sik_kullanilan_dosyalar.ajx) çeker."""
@@ -2241,12 +2265,23 @@ def run_cli_mode(args):
 
         if choice == "1":
             try:
-                tc_p = f"T.C. Kimlik No [{def_tc}]: " if def_tc else "T.C. Kimlik No: "
-                tc_val = input(tc_p).strip() or def_tc
-                gsm_p = f"GSM No (5xx...) [{def_gsm}]: " if def_gsm else "GSM No (başında 0 olmadan 10 hane): "
-                gsm_val = input(gsm_p).strip() or def_gsm
-                op_p = f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: "
-                op_val = input(op_p).strip() or def_op
+                tc_val, gsm_val, op_val = def_tc, def_gsm, def_op
+                if not (tc_val and gsm_val):
+                    tc_p = f"T.C. Kimlik No [{def_tc}]: " if def_tc else "T.C. Kimlik No: "
+                    tc_val = input(tc_p).strip() or def_tc
+                    gsm_p = f"GSM No (5xx...) [{def_gsm}]: " if def_gsm else "GSM No (başında 0 olmadan 10 hane): "
+                    gsm_val = input(gsm_p).strip() or def_gsm
+                    op_p = f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: "
+                    op_val = input(op_p).strip() or def_op
+                else:
+                    ans = input(f"Kayıtlı Mobil İmza bilgileri kullanılsın mı? ({def_tc} - {def_gsm}) [E/h]: ").strip().lower()
+                    if ans in ("h", "hayir", "n", "no"):
+                        tc_p = f"T.C. Kimlik No [{def_tc}]: "
+                        tc_val = input(tc_p).strip() or def_tc
+                        gsm_p = f"GSM No (5xx...) [{def_gsm}]: "
+                        gsm_val = input(gsm_p).strip() or def_gsm
+                        op_p = f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: "
+                        op_val = input(op_p).strip() or def_op
 
                 if not tc_val or not gsm_val:
                     print("[!] T.C. Kimlik No ve GSM No zorunludur.")
@@ -2326,18 +2361,31 @@ def run_cli_mode(args):
         s_str = s_d.strftime("%d.%m.%Y")
         e_str = e_d.strftime("%d.%m.%Y")
 
-        while True:
-            resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
+        slice_attempt = 0
+        max_slice_attempts = 4
+        while slice_attempt < max_slice_attempts:
+            slice_attempt += 1
+            try:
+                resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
+            except Exception as e:
+                resp = {"status": 500, "ok": False, "error": str(e), "rawText": str(e)}
+
             raw_text = str(resp.get("rawText", "")).lower()
 
-            need_relogin = (
-                not resp.get("ok")
-                or resp.get("status") in (401, 403)
+            is_session_expired = (
+                resp.get("status") in (401, 403)
                 or "nosessionobject" in raw_text
-                or "oturum" in raw_text
+                or "oturum bulunamadı" in raw_text
+                or "oturum sonlandı" in raw_text
             )
 
-            if need_relogin:
+            # Geçici bağlantı/timeout hatası durumunda oturumun gerçekten düşüp düşmediğini kontrol et
+            if not resp.get("ok") and not is_session_expired:
+                u_check = bridge.check_login_and_user()
+                if not u_check.get("user", {}).get("tcKimlikNo"):
+                    is_session_expired = True
+
+            if is_session_expired:
                 print(f"\n[!] UYARI: UYAP oturum süresi doldu (HTTP {resp.get('status', '401')}).")
                 if auto_relogin and pin:
                     print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
@@ -2376,6 +2424,16 @@ def run_cli_mode(args):
                         print("[✓] Oturum algılandı. Taramaya devam ediliyor...")
                         break
                 continue
+
+            if not resp.get("ok"):
+                err_msg = resp.get("error") or resp.get("rawText") or "Zaman aşımı / Sunucu yanıtı alınamadı"
+                if slice_attempt < max_slice_attempts:
+                    print(f"\n  [!] Dilim [{idx}/{len(ranges)}] geçici bağlantı/gecikme hatası ({err_msg[:60]}). 4 sn sonra tekrar deneniyor...")
+                    time.sleep(4.0)
+                    continue
+                else:
+                    print(f"\n  [x] Dilim [{idx}/{len(ranges)}] ({s_str} - {e_str}) yanıt vermedi, sonraki dilime geçiliyor.")
+                    break
 
             break
 
