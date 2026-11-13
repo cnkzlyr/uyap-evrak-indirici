@@ -122,6 +122,14 @@ UYAP güvenlik amacıyla `dosyaId` değerini **oturum bazlı dinamik şifreler**
 - Tarayıcı içinde 5'li paralel evrak sorgulama (`query_dosyalar_evraklar_batch`) geliştirildi.
 - İndirilen evraklar `Ceza_Yargisi`, `Hukuk_Yargisi`, `Idari_Yargi` şeklinde kategorize edilerek yanına `ai_case_manifest.json` ve `ai_durusma_kronolojisi.csv` üretildi.
 
+### 8. Aşama: Oturum Düşmesi & "Fiziksel Dosya Yok" Yanılsamasının Düzeltilmesi (Session Expiry vs Missing File Fix)
+- **Problem:** İndirme işlemi 150. evraka geldiğinde (~15 dakika sonra) UYAP oturumu zaman aşımına uğruyor, sunucu `/giris` HTML sayfasına yönlendiriyordu. Ancak `/avukatKisiselBilgileriSorgula.ajx` servisi arka planda kullanıcı bilgisini dönmeye devam ettiği için script oturumu açık sanıyor ve kalan 2.121 evrakı *"UYAP sunucusunda fiziksel dosya yok"* diyerek hatalı biçimde atlıyordu.
+- **Çözüm:** 
+  1. Kesin oturum doğrulayıcı (`is_logged_in`) geliştirildi. Sayfa URL'i `/giris` ise veya korumalı API `PRTL_GNL_10000-2` dönüyorsa oturumun kesin kapalı olduğu tespit edilir.
+  2. Dönen yanıtın `text/html` olması oturum düşmesi olarak işaretlendi ve otomatik Mobil İmza tetiklendi.
+  3. `login_with_mobil_imza` fonksiyonunun sahte "Zaten açık oturum var" diyerek döngüye girmesi engellendi.
+  4. Oturum yenilendikten sonra UYAP'ın sıfırladığı dinamik AES `dosyaId` token'larını kuyruktaki tüm kalan evraklar için anında yenileyen `refresh_dosya_ids_in_queue` mekanizması devreye alındı.
+
 ---
 
 ## 4. Sistem Mimarisi ve Veri Akışı

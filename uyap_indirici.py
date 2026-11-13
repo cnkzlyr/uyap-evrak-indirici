@@ -796,14 +796,56 @@ class UyapBrowserBridge:
         except Exception as e:
             return False, f"Otomatik e-İmza giriş hatası: {e}"
 
+    def is_logged_in(self) -> bool:
+        """
+        Tarayıcının gerçekten aktif, kimlik doğrulaması yapılmış bir UYAP oturumunda
+        olup olmadığını kesin olarak doğrular.
+        /giris veya /login sayfalarındaysa, ya da korumalı uç nokta PRTL_GNL hatası veriyorsa False döner.
+        """
+        js = """
+        (async () => {
+            const href = window.location.href;
+            if (href.includes("/giris") || !href.includes("/main/")) {
+                return false;
+            }
+            try {
+                const r = await fetch("/search_phrase_detayli.ajx", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({yargiTuru: "1", durum: "1"})
+                });
+                if (!r.ok) return false;
+                const data = await r.json();
+                if (data && data.errorCode) return false;
+                return true;
+            } catch (e) {
+                return false;
+            }
+        })()
+        """
+        try:
+            return bool(self.eval_js(js, timeout=10.0))
+        except Exception:
+            return False
+
     def check_login_and_user(self) -> dict:
         """Kullanıcının UYAP'a giriş yapıp yapmadığını ve TCKN/Ad/Soyad bilgisini kontrol eder."""
         js = """
         (async () => {
             const url = window.location.href;
+            if (url.includes("/giris") || !url.includes("/main/")) {
+                sessionStorage.removeItem("kullanici");
+                localStorage.removeItem("loginState");
+                return {
+                    url: url,
+                    loginState: "false",
+                    user: null,
+                    title: document.title
+                };
+            }
             let user = null;
             try {
-                // Sunucu oturumunu doğrula (401 / nosessionobject kontrolü)
+                // Sunucu oturumunu doğrula
                 const r = await fetch("/avukatKisiselBilgileriSorgula.ajx", {
                     method: "POST",
                     headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
@@ -811,17 +853,21 @@ class UyapBrowserBridge:
                 });
                 if (r.ok) {
                     const d = await r.json();
-                    if (d && Array.isArray(d) && d[0] && d[0].tcKimlikNo) {
-                        user = d[0];
-                    } else if (d && d.tcKimlikNo) {
-                        user = d;
+                    if (d && !d.errorCode) {
+                        if (Array.isArray(d) && d[0] && d[0].tcKimlikNo) {
+                            user = d[0];
+                        } else if (d && d.tcKimlikNo) {
+                            user = d;
+                        }
                     }
                     if (user) {
                         sessionStorage.setItem("kullanici", JSON.stringify(user));
                         localStorage.setItem("loginState", "true");
+                    } else {
+                        sessionStorage.removeItem("kullanici");
+                        localStorage.removeItem("loginState");
                     }
                 } else {
-                    // Sunucu oturumu düşmüş
                     sessionStorage.removeItem("kullanici");
                     localStorage.removeItem("loginState");
                     user = null;
@@ -862,10 +908,10 @@ class UyapBrowserBridge:
             else:
                 print(m)
 
-        # Aktif oturum var mı kontrol et
-        uinfo = self.check_login_and_user()
-        usr = uinfo.get("user") or {}
-        if usr.get("tcKimlikNo"):
+        # Aktif oturum var mı kontrol et (kesin kontrol: /giris sayfasında değil ve API yanıt veriyor)
+        if self.is_logged_in():
+            uinfo = self.check_login_and_user()
+            usr = uinfo.get("user") or {}
             name = f"{usr.get('ad', '') or usr.get('adi', '')} {usr.get('soyad', '') or usr.get('soyadi', '')}".strip()
             return True, f"Zaten aktif UYAP oturumu mevcut: {name} ({usr.get('tcKimlikNo')})"
 
@@ -2440,20 +2486,24 @@ class UyapDownloaderApp:
                         )
 
                         if need_relogin:
-                            # Oturum gerçekten düşmüş mü yoksa evrak sunucuda mı yok kontrol et
-                            chk = self.bridge.check_login_and_user()
-                            usr_info = chk.get("user") or {}
-                            has_active_session = bool(usr_info.get("tcKimlikNo") or usr_info.get("tckn"))
+                            is_session_dead = (
+                                not self.bridge.is_logged_in()
+                                or "oturum" in reason.lower()
+                                or "html" in reason.lower()
+                                or "nosessionobject" in reason.lower()
+                                or "prtl_gnl" in reason.lower()
+                                or status_code in (401, 403, 302)
+                                or "text/html" in ct.lower()
+                            )
 
-                            if has_active_session and status_code not in (401, 403):
+                            if not is_session_dead and self.bridge.is_logged_in() and "text/html" not in ct.lower():
                                 self.log(
                                     f"BİLGİ: {item['evrak_adi']} UYAP sunucusunda fiziksel dosya olarak mevcut değil (Ekli dosya yok / Sunucu boş yanıt verdi). Atlandı."
                                 )
                                 break
 
                             self.log(
-                                f"UYARI: {item['evrak_adi']} indirilemedi (Oturum kapalı veya sunucu hatası) "
-                                f"[Deneme {attempt}/{max_retries}]",
+                                f"UYARI: {item['evrak_adi']} indirilemedi ({reason}) [Deneme {attempt}/{max_retries}]",
                                 level="WARNING"
                             )
                             if self.var_auto_relogin.get() and attempt < max_retries:
@@ -2629,6 +2679,39 @@ class UyapDownloaderApp:
                     h.get("path", ""),
                 ])
         self.log(f"Liste dışa aktarıldı: {path}")
+
+
+def refresh_dosya_ids_in_queue(bridge, queue: list, start_idx: int):
+    """
+    Oturum yenilendiğinde (Mobil İmza sonrası), UYAP sunucusunun dinamik olarak
+    yeniden şifrelediği taze dosyaId token'larını çeker ve indirme kuyruğunu günceller.
+    """
+    print("[*] Yeni oturum için dosya token'ları (dosyaId) güncelleniyor...")
+    try:
+        fresh_cases = bridge.query_tum_dosyalar(include_closed=True, use_cache=False)
+        case_map = {}
+        for fc in fresh_cases:
+            b_name = str(fc.get("birimAdi") or fc.get("mahkemeAdi") or "").strip()
+            d_no = str(fc.get("dosyaNO") or fc.get("dosyaNo") or "").strip()
+            n_id = str(fc.get("dosyaID") or fc.get("dosyaId") or "").strip()
+            if b_name and d_no and n_id:
+                case_map[(b_name, d_no)] = n_id
+
+        updated = 0
+        for i in range(max(0, start_idx), len(queue)):
+            it = queue[i]
+            k = (it["birim_adi"], it["dosya_no"])
+            if k in case_map:
+                new_id = case_map[k]
+                if it.get("download_params"):
+                    it["download_params"]["dosyaId"] = new_id
+                it["dosya_id"] = new_id
+                ev_id = str(it.get("evrak_id") or "")
+                it["unique_key"] = f"dosya_{new_id}_{ev_id}"
+                updated += 1
+        print(f"[✓] Kuyruktaki {updated} adet evrakın dosyaId token'ı yeni oturuma başarıyla uyarlandı.")
+    except Exception as e:
+        print(f"[!] Oturum token'ı güncelleme uyarısı: {e}")
 
 
 def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
@@ -2978,25 +3061,37 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
             )
 
             if need_relogin:
-                chk = bridge.check_login_and_user()
-                usr_info = chk.get("user") or {}
-                has_active_session = bool(usr_info.get("tcKimlikNo") or usr_info.get("tckn"))
-                if has_active_session and status_code not in (401, 403):
-                    print(f"[-] BİLGİ: {item['evrak_adi']} ({item['birim_adi']}) sunucuda dosya olarak bulunamadı. Atlandı.")
-                    break
+                is_session_dead = (
+                    not bridge.is_logged_in()
+                    or "oturum" in reason.lower()
+                    or "html" in reason.lower()
+                    or "nosessionobject" in reason.lower()
+                    or "prtl_gnl" in reason.lower()
+                    or status_code in (401, 403, 302)
+                    or "text/html" in ct.lower()
+                )
 
-                cfg = load_user_config()
-                c_tc = cfg.get("tc", tckn)
-                c_gsm = cfg.get("gsm", "")
-                c_op = cfg.get("operator", "2")
-                if c_tc and c_gsm:
-                    print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
-                    m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
-                    if m_ok:
-                        print(f"[✓] {m_msg}. Evrak tekrar deneniyor...")
-                        continue
-                time.sleep(3.0)
-                continue
+                if is_session_dead:
+                    print(f"[!] UYARI: Evrak alınamadı ({item['evrak_adi']}) - {reason} [Deneme {attempt}/{max_retries}]")
+                    cfg = load_user_config()
+                    c_tc = cfg.get("tc", tckn)
+                    c_gsm = cfg.get("gsm", "")
+                    c_op = cfg.get("operator", "2")
+                    if c_tc and c_gsm and attempt < max_retries:
+                        print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
+                        m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
+                        if m_ok:
+                            print(f"[✓] {m_msg}.")
+                            refresh_dosya_ids_in_queue(bridge, download_queue, idx - 1)
+                            continue
+                        else:
+                            print(f"[x] Mobil İmza ile oturum yenilenemedi: {m_msg}")
+                    time.sleep(3.0)
+                    continue
+
+                if bridge.is_logged_in() and "text/html" not in ct.lower():
+                    print(f"[-] BİLGİ: {item['evrak_adi']} ({item['birim_adi']}) UYAP sunucusunda fiziksel dosya olarak mevcut değil (Ekli dosya yok). Atlandı.")
+                    break
 
             if is_valid:
                 cd = resp.get("contentDisposition") or ""
@@ -3664,18 +3759,23 @@ def run_cli_mode(args):
             )
 
             if need_relogin:
-                # Oturum gerçekten düşmüş mü yoksa evrak sunucuda mı yok kontrol et
-                chk = bridge.check_login_and_user()
-                usr_info = chk.get("user") or {}
-                has_active_session = bool(usr_info.get("tcKimlikNo") or usr_info.get("tckn"))
+                is_session_dead = (
+                    not bridge.is_logged_in()
+                    or "oturum" in reason.lower()
+                    or "html" in reason.lower()
+                    or "nosessionobject" in reason.lower()
+                    or "prtl_gnl" in reason.lower()
+                    or status_code in (401, 403, 302)
+                    or "text/html" in ct.lower()
+                )
 
-                if has_active_session and status_code not in (401, 403):
-                    # Oturum açık, bu evrak UYAP sunucusunda fiziken yok (SPA boş/hata sayfası döndü)
+                if not is_session_dead and bridge.is_logged_in() and "text/html" not in ct.lower():
+                    # Oturum kesin açık ve dönen yanıt HTML değil, bu evrak UYAP sunucusunda fiziken yok
                     print(f"[-] BİLGİ: {item['evrak_adi']} ({item['birim_adi']}) UYAP sunucusunda fiziksel dosya olarak mevcut değil (Ekli dosya yok). Atlandı.")
                     break
 
                 # Oturum gerçekten düşmüşse yeniden giriş yap:
-                print(f"[!] UYARI: UYAP oturumu sonlanmış. Yeniden bağlanılıyor... [Deneme {attempt}/{max_retries}]")
+                print(f"[!] UYARI: UYAP oturumu sonlanmış ({reason}). Yeniden bağlanılıyor... [Deneme {attempt}/{max_retries}]")
                 if auto_relogin and pin and attempt < max_retries:
                     print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
                     re_ok, re_msg = bridge.auto_relogin(pin=pin)
