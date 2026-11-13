@@ -20,15 +20,21 @@ Masaüstü Linux/macOS sistemlerinin yanı sıra **Android (Termux)** üzerinde 
 3. **Tam Mükerrerlik ve Eksiklik Önleme (Kalıcı İş Emir No Mimarisi):**
    * UYAP'ın sorgu bazlı dinamik şifrelediği geçici evrak kodları yerine kalıcı **İş Emir Numarası (`isEmirNo`)** ve içerik eşleşmesi kullanır.
    * Diskte sağlam bulunan dosyaları anında atlar (sıfır kota kaybı). Sadece eksik veya silinmiş evrakları indirir.
+   * **İşlem Önbelleği (`taranan_islem_cache.json`):** Çok yıllık geçmiş taramalarda yüzlerce dilimi her seferinde tekrar sorgulamak yerine önbellekten anında okur, indirmeye 0 saniyede başlar.
 
-4. **Sahte HTML / Hata Sayfası Koruması:**
-   * Oturum düşmesiyle dönen HTML sayfalarını veya JSON hata yanıtlarını asla UDF/PDF olarak kaydetmez.
-   * Dosyaları önce `.part` uzantısıyla kaydeder, doğrular ve atomik olarak asıl ismine taşır.
+4. **Akıllı Boş Evrak / Ekli Dosya Yok Ayrımı & Sahte HTML Koruması:**
+   * UYAP sunucusunda fiziksel eki olmayan kayıtlar (örn: bazı soruşturma inceleme talepleri veya sistem bildirimleri) ile gerçek oturum düşmelerini ayırt eder.
+   * Oturum açıkken gelen boş yanıtları sahte Mobil İmza döngüsüne sokmadan saniyeler içinde "Ekli dosya yok" diyerek atlar.
+   * Oturum düşmesiyle dönen HTML sayfalarını veya JSON hata yanıtlarını asla UDF/PDF olarak kaydetmez. Dosyaları önce `.part` uzantısıyla kaydeder, doğrular ve atomik olarak asıl ismine taşır.
 
-5. **UYAP Koruma Sistemi (Anti-Ban & Anti-Flood):**
-   * Seri indirme, rastgele jitter beklemesi (2.5 - 6.0 sn) ve her N dosyada dinlenme molası verir.
+5. **Otomatik Oturum Kurtarma (Self-Healing Session):**
+   * UYAP'ın 40 dakikalık normal oturum süresi bittiğinde sistem durmaz; otomatik olarak telefonunuza yeni bir Mobil İmza onay bildirimi gönderir.
+   * Siz telefonunuzdan onayladığınız anda e-Devlet izin ekranını otomatik geçerek kaldığı evraktan indirmeye devam eder.
 
-6. **Rotasyonlu Metin Günlüğü (Rotating TXT Logger):**
+6. **Optimize Edilmiş Güvenli Hızlı İndirme (Anti-Ban & Anti-Flood):**
+   * UYAP güvenlik duvarlarını (WAF) tetiklemeyen rastgele jitter gecikmesi (1.2 - 2.8 sn) ve her 20 dosyada bir 10 saniyelik dinlenme molasıyla yüksek hız ve maksimum güvenliği dengeler.
+
+7. **Rotasyonlu Metin Günlüğü (Rotating TXT Logger):**
    * `uyap_indirici_log.txt` dosyasına sürekli ve anlık yazar.
    * Dosya boyutu 8 MB sınırına ulaştığında yeni dosyaya geçer (maksimum 3 yedek tutar).
 
@@ -49,13 +55,27 @@ Kurulumdan sonra başlatıcıyı çalıştırın:
 ```bash
 ./baslat_termux.sh
 ```
-Açılan menüden dilediğiniz modu seçebilirsiniz:
-* **Seçenek 1 (Terminal / CLI Modu - Önerilen):** Ekran veya X11 açmadan, doğrudan Termux siyah ekranında canlı ilerleme çubuğuyla çalışır.
-* **Seçenek 2 (Termux:X11 Grafik Arayüzü):** Telefonunuzda masaüstü penceresi açılır.
-* **Seçenek 3 (Headless Modu):** Chromium'u tamamen arkaplanda çalıştırır.
+Açılan interaktif menüden dilediğiniz modu seçebilirsiniz:
+* **Seçenek 1 (Terminal CLI Modu - Son 1 Yıl [Önerilen]):** Son 365 güne ait tüm evrakları ekransız, doğrudan Termux siyah ekranında canlı ilerleme çubuğuyla indirir.
+* **Seçenek 2 (Terminal CLI Modu - Geçmiş Yıllar / Özel Tarih Aralığı):** Belirleyeceğiniz başlangıç ve bitiş tarihleri (örn: `01.01.2020` - `13.11.2026`) arasındaki tüm geçmiş dava ve savcılık evraklarını 30'ar günlük dilimlerle eksiksiz tarayıp indirir.
+* **Seçenek 3 (Termux:X11 Grafik Arayüzü):** Telefonunuzda masaüstü penceresi açar ve filtrelemeli tablo sunar.
+* **Seçenek 4 (Headless Modu):** Chromium'u tamamen arkaplanda çalıştırır.
+
+### 3. Komut Satırı (CLI) Parametreleri:
+Script doğrudan parametrelerle de çalıştırılabilir:
+```bash
+# Son 1 yılın evraklarını indir:
+python3 uyap_indirici.py --cli
+
+# Özel tarih aralığı (Geçmiş yıllar):
+python3 uyap_indirici.py --cli --start-date 01.01.2020 --end-date 13.11.2026
+
+# Headless Chromium ile başlat:
+python3 uyap_indirici.py --cli --headless
+```
 
 > [!TIP]
-> **Android İndirme Konumu:** Android/Termux üzerinde indirilen evraklar doğrudan telefonunuzun dahili hafızasındaki **`İndirilenler/UYAP_Indirilenler`** (`/sdcard/Download/UYAP_Indirilenler`) klasörüne kaydedilir. Dosya yöneticinizden hemen açabilirsiniz.
+> **Android İndirme Konumu:** Android/Termux üzerinde indirilen evraklar doğrudan telefonunuzun dahili hafızasındaki **`İndirilenler/UYAP_Indirilenler`** (`/sdcard/Download/UYAP_Indirilenler`) klasörüne kaydedilir. Mahkeme ve evrak türüne göre hiyerarşik olarak klasörlenir. Dosya yöneticinizden hemen açabilirsiniz.
 
 ---
 
@@ -79,6 +99,15 @@ veya doğrudan CLI/Headless başlatmak için:
 ```bash
 python3 uyap_indirici.py --cli --headless
 ```
+
+---
+
+## 🗺️ Yol Haritası (Geliştirilmekte Olan Özellikler)
+
+- [ ] **Dava Dosyalarından Evrak Türüne Göre Toplu İndirici:** Belirli tarih aralığında tüm derdest dosyalardaki *Duruşma Tutanakları*, *Bilirkişi Raporları*, *Gerekçeli Kararlar* vb. evrak türlerini tek tuşla topluca çekme.
+- [ ] **UDF İçi Ek Dosyaları Otomatik Ayıklayıcı (Attachment Extractor):** İndirilen `.udf` dosyalarının içine gömülü PDF, JPEG, TIFF belgeleri tek tıkla klasörlere ayıklama.
+- [ ] **Duruşma Takvimi & Ajanda Dışa Aktarıcı:** UYAP duruşma listesini doğrudan Google Takvim / iCal (`.ics`) formatında takvime işleme.
+- [ ] **Yeni Evrak Nöbetçisi (Otomatik İzleme):** Dosyalara yeni evrak, tensip veya karar eklendiğinde arka planda tespit edip anlık bildirim gönderme.
 
 ---
 

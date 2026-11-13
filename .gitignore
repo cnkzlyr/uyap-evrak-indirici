@@ -4,6 +4,7 @@ UYAP_Indirilenler/
 .uyap_config.json
 indirme_gecmisi.json
 indirme_indeksi.csv
+*cache.json
 *.csv
 uyap_indirici_log.txt*
 loglar/
