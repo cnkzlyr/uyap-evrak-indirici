@@ -13,9 +13,9 @@ Masaüstü Linux/macOS sistemlerinin yanı sıra **Android (Termux)** üzerinde 
    * **Terminal / CLI Modu (`--cli`):** Ekransız, grafik kartı gerektirmeyen, doğrudan terminalde canlı ilerleme çubuğuyla çalışan mod.
    * **Headless Modu (`--headless`):** Chromium'u arkaplanda (penceresiz) çalıştırarak minimum kaynak tüketimi sağlar.
 
-2. **Esnek Kimlik Doğrulama (e-İmza & Mobil İmza Desteği):**
+2. **Esnek Kimlik Doğrulama (Otomatik Mobil İmza & e-İmza Desteği):**
+   * **Mobil İmza Otomasyonu (Termux/Android):** Ekransız (CLI / Headless) çalışırken T.C. Kimlik ve GSM numaranızla doğrudan telefonunuza SIM onay bildirimi ve parmak izi gönderir. Ekrana gelen bildirime PIN kodunuzu girip onayladığınız an UYAP oturumu açılır ve indirme otomatik başlar. Bilgiler yerel yapılandırmada güvenle saklanır, tekrar girmeniz gerekmez.
    * **e-İmza Otomatik Yenileme:** Bilgisayarda ArkSigner (`localhost:5975`) üzerinden PIN ile kesintisiz otomatik oturum açma.
-   * **Mobil İmza / Manuel Giriş Bekleme:** ArkSigner bulunmayan ortamlarda (Android/Termux gibi) oturum düştüğünde program çökmek yerine kullanıcıdan Mobil İmza veya e-Devlet girişini bekler; giriş yapıldığı an indirmeye kaldığı yerden devam eder.
 
 3. **Tam Mükerrerlik ve Eksiklik Önleme (Kalıcı İş Emir No Mimarisi):**
    * UYAP'ın sorgu bazlı dinamik şifrelediği geçici evrak kodları yerine kalıcı **İş Emir Numarası (`isEmirNo`)** ve içerik eşleşmesi kullanır.

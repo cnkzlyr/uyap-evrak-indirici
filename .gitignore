@@ -1,6 +1,7 @@
 # UYAP İndirilen Dosyalar ve Hassas Veriler (KVKK & Gizlilik)
 UYAP_Indirilenler/
 .uyap_chrome_profile/
+.uyap_config.json
 indirme_gecmisi.json
 indirme_indeksi.csv
 *.csv

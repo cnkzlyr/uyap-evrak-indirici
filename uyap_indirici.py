@@ -68,6 +68,7 @@ CDP_PORT = 9223
 UYAP_BASE_URL = "https://avukat.uyap.gov.tr"
 ARKSIGNER_URL = "http://localhost:5975"
 PIN_FILE = BASE_DIR / "pin.txt"
+CONFIG_FILE = BASE_DIR / ".uyap_config.json"
 DEFAULT_E_IMZA_PIN = ""
 if PIN_FILE.exists():
     try:
@@ -77,6 +78,30 @@ if PIN_FILE.exists():
 if not DEFAULT_E_IMZA_PIN:
     DEFAULT_E_IMZA_PIN = os.environ.get("UYAP_E_IMZA_PIN", "")
 SIGN_CHALLENGE = "QWRhbGV0IEJha2FubMSxxJ/EsSBCaWxnaSDEsMWfbGVtIEdlbmVsIE3DvGTDvHJsw7zEn8O8IHRhcmFmxLFuZGFuIGdlbGnFn3RpcmlsZW4gdXlndWxhbWF5YSBlLWltemEgZ2lyacWfIHlhcG1hayBpc3RpeW9ydW0u"
+
+
+def load_user_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_user_config(data: dict):
+    try:
+        cur = load_user_config()
+        cur.update(data)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cur, f, ensure_ascii=False, indent=2)
+        try:
+            os.chmod(CONFIG_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Rotasyonlu Loglama Altyapısı (Maksimum 8 MB, 3 Yedek)
@@ -534,6 +559,238 @@ class UyapBrowserBridge:
         })()
         """
         return self.eval_js(js, timeout=15.0) or {}
+
+    def login_with_mobil_imza(
+        self,
+        tc: str,
+        gsm: str,
+        operator: str = "turktelekom",
+        status_cb=None
+    ) -> tuple[bool, str]:
+        """
+        e-Devlet Mobil İmza ile UYAP Avukat Portal oturumunu otomatik başlatır.
+        1. avukat.uyap.gov.tr/giris üzerinden Mobil İmza sayfasına yönlendirir.
+        2. TC, GSM ve Operatör bilgilerini doldurup gönderir.
+        3. Taahhütnameyi onaylar (İmzala).
+        4. Parmak izini alır ve kullanıcının SIM onayını bekler.
+        5. e-Devlet OAuth 'Onayla' ekranını otomatik onaylar.
+        6. UYAP oturumunun başarıyla açıldığını doğrular.
+        """
+        def log_msg(m):
+            if status_cb:
+                status_cb(m)
+            else:
+                print(m)
+
+        # Aktif oturum var mı kontrol et
+        uinfo = self.check_login_and_user()
+        usr = uinfo.get("user") or {}
+        if usr.get("tcKimlikNo"):
+            name = f"{usr.get('adi', '')} {usr.get('soyadi', '')}".strip()
+            return True, f"Zaten aktif UYAP oturumu mevcut: {name} ({usr.get('tcKimlikNo')})"
+
+        tc = str(tc).strip()
+        gsm_digits = re.sub(r"\D", "", str(gsm))
+        if gsm_digits.startswith("90") and len(gsm_digits) == 12:
+            gsm_digits = gsm_digits[2:]
+        elif gsm_digits.startswith("0") and len(gsm_digits) == 11:
+            gsm_digits = gsm_digits[1:]
+
+        op_map = {
+            "1": "turkcell",
+            "turkcell": "turkcell",
+            "2": "turktelekom",
+            "turktelekom": "turktelekom",
+            "avea": "turktelekom",
+            "tt": "turktelekom",
+            "3": "vodafone",
+            "vodafone": "vodafone"
+        }
+        op_id = op_map.get(str(operator).lower().strip(), "")
+        if not op_id:
+            if gsm_digits.startswith(("551", "552", "553", "554", "555", "559", "501", "505", "506", "507")):
+                op_id = "turktelekom"
+            elif gsm_digits.startswith(("541", "542", "543", "544", "545", "546", "547", "548", "549")):
+                op_id = "vodafone"
+            else:
+                op_id = "turkcell"
+
+        log_msg("[*] UYAP Mobil İmza sayfasına bağlanılıyor...")
+
+        # Adım 1: Mobil İmza giriş sayfasına geç
+        js_nav = """
+        (() => {
+            if (window.location.href.includes("giris.turkiye.gov.tr/Giris/Mobil-Imza")) {
+                return "already_on_page";
+            }
+            const arrow = document.querySelector(".edevlet-dropdown .dx-icon-spindown") || document.querySelector(".edevlet-dropdown");
+            if (arrow) {
+                arrow.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
+                const item = [...document.querySelectorAll(".dx-overlay-content *")].find(e => e.innerText && e.innerText.trim() === "Mobil İmza İle Giriş");
+                if (item) {
+                    item.click();
+                    item.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
+                    return "clicked_dropdown";
+                }
+            }
+            window.location.href = "https://giris.turkiye.gov.tr/Giris/Mobil-Imza?oauthClientId=27e1dfc0-8536-11e4-b4a9-0800200c9a66&continue=" + encodeURIComponent("https://giris.turkiye.gov.tr/OAuth2AuthorizationServer/AuthorizationController?response_type=code&scope=Kimlik-Dogrula%3BAd-Soyad&redirect_uri=https%3A%2F%2Favukat.uyap.gov.tr%2Flogin.uyap&client_id=27e1dfc0-8536-11e4-b4a9-0800200c9a66&state=1879&loginTypeIndex=2");
+            return "navigated";
+        })()
+        """
+        try:
+            self.eval_js(js_nav, timeout=10.0)
+        except Exception:
+            pass
+
+        # Formun yüklenmesini bekle
+        loaded = False
+        for _ in range(25):
+            time.sleep(0.5)
+            try:
+                check = self.eval_js("Boolean(document.getElementById('tridField') && document.getElementById('gsmField'))", timeout=5.0)
+                if check:
+                    loaded = True
+                    break
+            except Exception:
+                pass
+
+        if not loaded:
+            return False, "Mobil İmza giriş sayfası (giris.turkiye.gov.tr) yüklenemedi."
+
+        # Adım 2: Formu doldur ve gönder
+        js_fill = f"""
+        (() => {{
+            const tr = document.getElementById('tridField');
+            const gsm = document.getElementById('gsmField');
+            const op = document.getElementById({json.dumps(op_id)}) || document.getElementById('turktelekom');
+            if (!tr || !gsm) return {{ok: false, error: "Form alanları bulunamadı"}};
+
+            tr.value = {json.dumps(tc)};
+            tr.dispatchEvent(new Event('input', {{bubbles: true}}));
+            gsm.value = {json.dumps(gsm_digits)};
+            gsm.dispatchEvent(new Event('input', {{bubbles: true}}));
+            if (op) {{
+                op.checked = true;
+                op.dispatchEvent(new Event('change', {{bubbles: true}}));
+            }}
+            const btn = document.querySelector('.btn-send') || document.getElementById('submitButton');
+            if (btn) {{
+                btn.click();
+                return {{ok: true}};
+            }}
+            return {{ok: false, error: "Devam Et butonu bulunamadı"}};
+        }})()
+        """
+        fill_res = self.eval_js(js_fill, timeout=10.0)
+        if not fill_res or not fill_res.get("ok"):
+            return False, f"Form doldurulamadı: {fill_res}"
+
+        # Adım 3: Taahhütname (İmzala) adımını bekle
+        time.sleep(1.5)
+        js_sign = """
+        (() => {
+            const err = document.querySelector(".errorMessage, .alert-danger");
+            if (err && err.innerText.trim()) {
+                return {error: err.innerText.trim()};
+            }
+            const btn = document.querySelector('button[name="submitButton"]') || document.querySelector('.btn-send');
+            if (btn && (btn.innerText.includes("İmzala") || btn.value === "İmzala" || btn.innerText.includes("Devam"))) {
+                btn.click();
+                return {ok: true, clicked: "imzala"};
+            }
+            return {waiting: true};
+        })()
+        """
+        signed_step = False
+        for _ in range(20):
+            time.sleep(0.6)
+            try:
+                s_res = self.eval_js(js_sign, timeout=6.0)
+                if s_res and s_res.get("error"):
+                    return False, f"e-Devlet Hatası: {s_res['error']}"
+                if s_res and s_res.get("ok"):
+                    signed_step = True
+                    break
+            except Exception:
+                pass
+
+        log_msg("[*] Mobil İmza isteği operatöre iletildi. Parmak izi bekleniyor...")
+
+        # Adım 4: Parmak izi bilgisini yakala
+        js_wait_fp = """
+        (() => {
+            const text = document.body.innerText || "";
+            let fp = "";
+            const m = text.match(/İşlemin Parmak İzi:\\s*([A-F0-9\\s]{10,})/i);
+            if (m) {
+                fp = m[1].trim();
+            }
+            return {
+                url: window.location.href,
+                has_fingerprint: Boolean(fp),
+                fingerprint: fp,
+                is_waiting_user: text.includes("operatorden cevap") || text.includes("tamamlamanız bekleniyor") || text.includes("uyarısı")
+            };
+        })()
+        """
+        fp_str = ""
+        for _ in range(30):
+            time.sleep(0.5)
+            try:
+                st = self.eval_js(js_wait_fp, timeout=5.0)
+                if st and st.get("fingerprint"):
+                    fp_str = st["fingerprint"]
+                    break
+            except Exception:
+                pass
+
+        log_msg("\n" + "=" * 70)
+        log_msg("  📲 MOBİL İMZA ONAY BİLDİRİMİ TELEFONUNUZA GÖNDERİLDİ!")
+        if fp_str:
+            log_msg(f"  🔑 İşlemin Parmak İzi : {fp_str}")
+        log_msg("  ⏳ Lütfen telefonunuza gelen bildirime PIN KODUNUZU girip ONAYLAYINIZ.")
+        log_msg("  (İşlem tamamlanınca otomatik algılanacaktır, 90 sn süreniz vardır...)")
+        log_msg("=" * 70 + "\n")
+
+        # Adım 5: Kullanıcının telefondan onaylamasını bekle (OAuth Onayla ve UYAP yönlendirmesi)
+        js_poll_done = """
+        (() => {
+            const url = window.location.href;
+            // 1. OAuth onay ekranı geldi mi?
+            const oauthBtn = [...document.querySelectorAll('button')].find(b => (b.innerText && b.innerText.trim() === 'Onayla') || b.value === 'Onayla');
+            if (oauthBtn) {
+                oauthBtn.click();
+                return {status: "clicked_oauth_onayla"};
+            }
+            // 2. UYAP sayfasına ulaştık mı?
+            if (url.includes("avukat.uyap.gov.tr") && !url.includes("/giris")) {
+                return {status: "at_uyap_portal", url};
+            }
+            return {status: "waiting", url};
+        })()
+        """
+
+        start_wait = time.time()
+        while time.time() - start_wait < 100:
+            time.sleep(2.0)
+            try:
+                poll = self.eval_js(js_poll_done, timeout=6.0)
+                if not poll:
+                    continue
+                if poll.get("status") == "clicked_oauth_onayla":
+                    log_msg("[*] e-Devlet izin ekranı otomatik onaylandı. UYAP'a yönlendiriliyor...")
+                    time.sleep(2.5)
+
+                uinfo = self.check_login_and_user()
+                usr = uinfo.get("user") or {}
+                tckn_val = str(usr.get("tcKimlikNo") or usr.get("tckn") or "")
+                if tckn_val:
+                    name_val = f"{usr.get('adi', '')} {usr.get('soyadi', '')}".strip() or "Avukat"
+                    return True, f"Mobil İmza ile başarıyla giriş yapıldı: {name_val} (TCKN: {tckn_val})"
+            except Exception:
+                pass
+
+        return False, "Mobil İmza onay süresi doldu (Zaman aşımı). Lütfen tekrar deneyiniz."
 
     def query_uyap_islemlerim(self, tckn: str, start_date_str: str, end_date_str: str, islem_turu=None) -> dict:
         """uyap_islem_sorgula.ajx uç noktasına tarayıcı oturumu içinden POST isteği atar."""
@@ -1924,28 +2181,89 @@ def run_cli_mode(args):
             tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
 
     # Oturum açılmamışsa bekle (Mobil İmza / e-Devlet veya e-İmza)
-    if not tckn:
-        print("\n" + "-" * 70)
-        print(" [!] UYAP OTURUMU AÇIK DEĞİL!")
-        print(" Lütfen UYAP Avukat Portal'a giriş yapınız:")
-        print("   - Mobil İmza (SIM kart onayı)")
-        print("   - e-İmza (ArkSigner / USB Token)")
-        print("   - e-Devlet Kapısı")
-        if not headless:
-            print(" Açık olan Chromium tarayıcı penceresinden giriş yapabilirsiniz.")
-        else:
-            print(f" Tarayıcı arkaplanda çalışıyor. Giriş bekleniyor ({UYAP_BASE_URL})...")
-        print(" Sistem girişinizi otomatik olarak algılayıp indirmeye başlayacaktır.")
-        print("-" * 70 + "\n")
+    cfg = load_user_config()
+    def_tc = getattr(args, "tc", "") or cfg.get("tc", "")
+    def_gsm = getattr(args, "gsm", "") or cfg.get("gsm", "")
+    def_op = getattr(args, "operator", "") or cfg.get("operator", "2")
 
-        while not tckn:
-            time.sleep(2.5)
-            try:
+    if not tckn and (getattr(args, "mobil_imza", False) or (getattr(args, "tc", "") and getattr(args, "gsm", ""))):
+        tc_in = getattr(args, "tc", "") or def_tc
+        gsm_in = getattr(args, "gsm", "") or def_gsm
+        op_in = getattr(args, "operator", "") or def_op
+        if tc_in and gsm_in:
+            m_ok, m_msg = bridge.login_with_mobil_imza(tc_in, gsm_in, op_in)
+            if m_ok:
+                print(f"[✓] {m_msg}")
+                save_user_config({"tc": tc_in, "gsm": gsm_in, "operator": op_in})
                 info = bridge.check_login_and_user()
                 user = info.get("user") or {}
                 tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-            except Exception:
-                pass
+            else:
+                print(f"[x] {m_msg}")
+
+    while not tckn:
+        print("\n" + "=" * 70)
+        print("  [!] UYAP OTURUMU AÇIK DEĞİL - LÜTFEN BİR GİRİŞ YÖNTEMİ SEÇİN:")
+        print("  1) Mobil İmza ile Giriş (SIM Kartınıza Onay Gönderir - Önerilen)")
+        print("  2) e-İmza Otomatik Yenile (ArkSigner)")
+        print("  3) Mevcut Tarayıcı / Termux:X11 Oturumunu Bekle")
+        print("=" * 70)
+
+        try:
+            choice = input("Seçiminiz (1, 2 veya 3) [Varsayılan: 1]: ").strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            print("\nİşlem iptal edildi.")
+            sys.exit(0)
+
+        if choice == "1":
+            try:
+                tc_p = f"T.C. Kimlik No [{def_tc}]: " if def_tc else "T.C. Kimlik No: "
+                tc_val = input(tc_p).strip() or def_tc
+                gsm_p = f"GSM No (5xx...) [{def_gsm}]: " if def_gsm else "GSM No (başında 0 olmadan 10 hane): "
+                gsm_val = input(gsm_p).strip() or def_gsm
+                op_p = f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: "
+                op_val = input(op_p).strip() or def_op
+
+                if not tc_val or not gsm_val:
+                    print("[!] T.C. Kimlik No ve GSM No zorunludur.")
+                    continue
+
+                m_ok, m_msg = bridge.login_with_mobil_imza(tc_val, gsm_val, op_val)
+                if m_ok:
+                    print(f"[✓] {m_msg}")
+                    save_user_config({"tc": tc_val, "gsm": gsm_val, "operator": op_val})
+                    info = bridge.check_login_and_user()
+                    user = info.get("user") or {}
+                    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
+                else:
+                    print(f"[x] {m_msg}")
+            except (EOFError, KeyboardInterrupt):
+                print("\nİşlem iptal edildi.")
+                sys.exit(0)
+
+        elif choice == "2":
+            pin_in = input(f"e-İmza PIN Kodu [{pin}]: ").strip() or pin
+            if pin_in:
+                re_ok, re_msg = bridge.auto_relogin(pin=pin_in)
+                if re_ok:
+                    print(f"[✓] {re_msg}")
+                    info = bridge.check_login_and_user()
+                    user = info.get("user") or {}
+                    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
+                else:
+                    print(f"[x] {re_msg}")
+            else:
+                print("[!] PIN girilmedi.")
+
+        else:
+            print(f"[*] Tarayıcı oturumu bekleniyor ({UYAP_BASE_URL})...")
+            for _ in range(15):
+                time.sleep(2.0)
+                info = bridge.check_login_and_user()
+                user = info.get("user") or {}
+                tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
+                if tckn:
+                    break
 
     full_name = f"{user.get('adi', '')} {user.get('soyadi', '')}".strip() or "Avukat"
     baro = user.get("baroAdi") or ""
@@ -2215,6 +2533,10 @@ def main():
     parser.add_argument("--chunk-days", type=int, default=30, help="Sorgu dilim aralığı (gün)")
     parser.add_argument("--dir", type=str, default="", help="İndirme klasörü")
     parser.add_argument("--no-auto-relogin", action="store_true", help="Otomatik e-imza girişini devre dışı bırak")
+    parser.add_argument("--tc", type=str, default="", help="Mobil İmza için T.C. Kimlik Numarası")
+    parser.add_argument("--gsm", type=str, default="", help="Mobil İmza için GSM Numarası (başında sıfır olmadan 10 hane)")
+    parser.add_argument("--operator", type=str, default="", choices=["", "turktelekom", "turkcell", "vodafone", "1", "2", "3"], help="Mobil İmza operatörü (turktelekom, turkcell, vodafone)")
+    parser.add_argument("--mobil-imza", action="store_true", help="Oturum yoksa doğrudan Mobil İmza akışını başlat")
 
     args = parser.parse_args()
 
