@@ -142,6 +142,9 @@ def sanitize_path_part(value: str, default: str = "Belirtilmemis", max_len: int 
     return s
 
 
+slugify_filename = sanitize_path_part
+
+
 def infer_dosya_turu(birim_adi: str, explicit_tur: str = "") -> str:
     """Birim adından veya açık dosya türünden anlamlı bir Dosya/Yargı Türü kategorisi çıkarır."""
     if explicit_tur and explicit_tur.strip():
@@ -2487,14 +2490,25 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                     cd_filename = m.group(1).strip()
                 ext = guess_extension(cd_filename, ct, raw_bytes)
 
-                b_slug = slugify_filename(item["birim_adi"])
-                d_slug = slugify_filename(item["dosya_no"])
-                e_slug = slugify_filename(item["evrak_adi"])
-                file_name = f"{item['tarih']}_{b_slug}_{d_slug}_{e_slug}.{ext}"
+                clean_ext = ext if ext.startswith(".") else f".{ext}"
+                b_slug = sanitize_path_part(item["birim_adi"], max_len=60)
+                d_slug = sanitize_path_part(item["dosya_no"], max_len=40)
+                e_slug = sanitize_path_part(item["evrak_adi"], max_len=60)
+                clean_ev_id = str(item.get("evrak_id") or "").replace('"', '').replace("'", "").strip()
+                doc_num = sanitize_path_part(item.get("is_emir_no") or clean_ev_id[:8], max_len=20)
+                file_name = f"{item['tarih']}_{e_slug}_{doc_num}{clean_ext}"
                 target_path = target_base / b_slug / d_slug / file_name
                 target_path.parent.mkdir(parents=True, exist_ok=True)
 
-                target_path.write_bytes(raw_bytes)
+                tmp_path = target_path.with_suffix(target_path.suffix + ".part")
+                tmp_path.write_bytes(raw_bytes)
+
+                if tmp_path.exists() and tmp_path.stat().st_size == len(raw_bytes):
+                    tmp_path.replace(target_path)
+                else:
+                    target_path.write_bytes(raw_bytes)
+                    tmp_path.unlink(missing_ok=True)
+
                 sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
 
                 app_helper.history[ukey] = {
@@ -2529,6 +2543,33 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                 time.sleep(batch_pause)
             else:
                 time.sleep(random.uniform(min_d, max_d))
+
+    # CSV İndeksi yaz
+    try:
+        csv_path = target_base / "indeks.csv"
+        with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow([
+                "Durum", "Tarih", "Dosya Türü", "Birim Adı", "Dosya No",
+                "İşlem Türü", "Evrak Türü", "Evrak ID", "Kaydedilen Dosya Yolu"
+            ])
+            for it in found_documents:
+                uk = it["unique_key"]
+                h = app_helper.history.get(uk, {})
+                writer.writerow([
+                    "İndirildi" if h else "Bekliyor",
+                    it["tarih"],
+                    it["dosya_turu"],
+                    it["birim_adi"],
+                    it["dosya_no"],
+                    it["islem_turu"],
+                    it["evrak_turu"],
+                    it["evrak_id"],
+                    h.get("path", ""),
+                ])
+        print(f"[✓] CSV İndeksi kaydedildi: {csv_path}")
+    except Exception as e:
+        print(f"[!] CSV kaydedilemedi: {e}")
 
     print("\n" + "=" * 70)
     print(f"  İNDİRME TAMAMLANDI! Bu oturumda {downloaded_now} dosya eksiksiz indirildi.")
