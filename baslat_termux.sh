@@ -75,12 +75,16 @@ case "$secim" in
         esac
 
         read -p "Evrak ekleri (attachments) de indirilsin mi? (e/H): " ek_sec
+        read -p "Filtrelemek istediğiniz Mahkeme / Dosya No (Tümü için boş geçiniz): " filter_kw
         read -p "Başlangıç Tarihi Filtresi (İsteğe bağlı GG.AA.YYYY): " start_d
         read -p "Bitiş Tarihi Filtresi     (İsteğe bağlı GG.AA.YYYY): " end_d
 
         args=("--cli" "--mode" "dosyalar" "--evrak-turu" "$tur" "--scope" "$scope")
         if [[ "$ek_sec" =~ ^[eEyY]$ ]]; then
             args+=("--include-attachments")
+        fi
+        if [ -n "$filter_kw" ]; then
+            args+=("--filter-birim" "$filter_kw")
         fi
         if [ -n "$start_d" ]; then
             args+=("--start-date" "$start_d")
@@ -104,9 +108,13 @@ case "$secim" in
             *) scope="all" ;;
         esac
 
+        read -p "Filtrelemek istediğiniz Mahkeme / Dosya No (Tümü için boş geçiniz): " filter_kw
         read -p "Başlangıç Tarihi Filtresi (İsteğe bağlı GG.AA.YYYY): " start_d
         read -p "Bitiş Tarihi Filtresi     (İsteğe bağlı GG.AA.YYYY): " end_d
         args=("--cli" "--mode" "dosyalar" "--evrak-turu" "tumu" "--include-attachments" "--scope" "$scope")
+        if [ -n "$filter_kw" ]; then
+            args+=("--filter-birim" "$filter_kw")
+        fi
         if [ -n "$start_d" ]; then
             args+=("--start-date" "$start_d")
         fi

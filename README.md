@@ -94,8 +94,12 @@ Desteklenen Evrak Filtreleri (`--evrak-turu`):
 - `tumu`: TÜM Evraklar ve Ek Belgeler (Toplu Eksiksiz Arşiv)
 
 ```bash
-# Tüm dosyalardaki (Açık + Kapalı / Karara Çıkmış 700+ Dosya) Duruşma Tutanaklarını indir (Mükerrerlik elenir):
+# Tüm dosyalardaki (Açık + Kapalı / Karara Çıkmış 700+ Dosya) Duruşma Tutanaklarını indir (İcra Daireleri otomatik elenir, AI Manifestosu üretilir):
 python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma --scope all
+
+# Spesifik bir mahkeme veya dosya numarası için hedefli arama (Örn: Erzurum veya 2025/506):
+python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma --filter-birim "erzurum"
+python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma --filter-birim "2025/506"
 
 # Yalnızca açık dosyalardaki Bilirkişi Raporlarını ve eklerini indir:
 python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu bilirkisi --include-attachments --scope acik
