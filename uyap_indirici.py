@@ -269,9 +269,9 @@ def is_valid_document_bytes(raw_bytes: bytes, content_type: str = "") -> tuple[b
         or b"<body" in sample
         or b"<title>" in sample
         or b"loginstate" in sample
-        or b"adalet" in sample and b"giris" in sample and b"<" in sample
+        or (b"adalet" in sample and b"giris" in sample and b"<" in sample)
     ):
-        return False, "UYAP oturumu sonlanmış (HTML giriş/hata sayfası döndü)"
+        return False, "UYAP sunucusunda fiziksel dosya mevcut değil (HTML sayfası döndü)"
 
     # JSON hata mesajı kontrolü
     if "application/json" in (content_type or "").lower() or sample.strip().startswith(b"{"):
@@ -613,7 +613,7 @@ class UyapBrowserBridge:
         uinfo = self.check_login_and_user()
         usr = uinfo.get("user") or {}
         if usr.get("tcKimlikNo"):
-            name = f"{usr.get('adi', '')} {usr.get('soyadi', '')}".strip()
+            name = f"{usr.get('ad', '') or usr.get('adi', '')} {usr.get('soyad', '') or usr.get('soyadi', '')}".strip()
             return True, f"Zaten aktif UYAP oturumu mevcut: {name} ({usr.get('tcKimlikNo')})"
 
         tc = str(tc).strip()
@@ -2001,9 +2001,19 @@ class UyapDownloaderApp:
                         )
 
                         if need_relogin:
+                            # Oturum gerçekten düşmüş mü yoksa evrak sunucuda mı yok kontrol et
+                            chk = self.bridge.check_login_and_user()
+                            usr_info = chk.get("user") or {}
+                            has_active_session = bool(usr_info.get("tcKimlikNo") or usr_info.get("tckn"))
+
+                            if has_active_session and status_code not in (401, 403):
+                                self.log(
+                                    f"BİLGİ: {item['evrak_adi']} UYAP sunucusunda fiziksel dosya olarak mevcut değil (Ekli dosya yok / Sunucu boş yanıt verdi). Atlandı."
+                                )
+                                break
+
                             self.log(
-                                f"UYARI: {item['evrak_adi']} indirilemedi veya geçersiz "
-                                f"(Sebep: {reason}, HTTP {status_code}, Hata: {err_hdr}). "
+                                f"UYARI: {item['evrak_adi']} indirilemedi (Oturum kapalı veya sunucu hatası) "
                                 f"[Deneme {attempt}/{max_retries}]",
                                 level="WARNING"
                             )
@@ -2547,7 +2557,18 @@ def run_cli_mode(args):
             )
 
             if need_relogin:
-                print(f"[!] UYARI: Evrak alınamadı ({item['evrak_adi']}) - {reason} [Deneme {attempt}/{max_retries}]")
+                # Oturum gerçekten düşmüş mü yoksa evrak sunucuda mı yok kontrol et
+                chk = bridge.check_login_and_user()
+                usr_info = chk.get("user") or {}
+                has_active_session = bool(usr_info.get("tcKimlikNo") or usr_info.get("tckn"))
+
+                if has_active_session and status_code not in (401, 403):
+                    # Oturum açık, bu evrak UYAP sunucusunda fiziken yok (SPA boş/hata sayfası döndü)
+                    print(f"[-] BİLGİ: {item['evrak_adi']} ({item['birim_adi']}) UYAP sunucusunda fiziksel dosya olarak mevcut değil (Ekli dosya yok). Atlandı.")
+                    break
+
+                # Oturum gerçekten düşmüşse yeniden giriş yap:
+                print(f"[!] UYARI: UYAP oturumu sonlanmış. Yeniden bağlanılıyor... [Deneme {attempt}/{max_retries}]")
                 if auto_relogin and pin and attempt < max_retries:
                     print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
                     re_ok, re_msg = bridge.auto_relogin(pin=pin)
