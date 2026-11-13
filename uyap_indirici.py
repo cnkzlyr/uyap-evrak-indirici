@@ -799,26 +799,21 @@ class UyapBrowserBridge:
     def is_logged_in(self) -> bool:
         """
         Tarayıcının gerçekten aktif, kimlik doğrulaması yapılmış bir UYAP oturumunda
-        olup olmadığını kesin olarak doğrular.
-        /giris veya /login sayfalarındaysa, ya da korumalı uç nokta PRTL_GNL hatası veriyorsa False döner.
+        olup olmadığını /kullanici_bilgileri.uyap ile kesin olarak doğrular.
         """
         js = """
         (async () => {
-            const href = window.location.href;
-            if (href.includes("/giris") || !href.includes("/main/")) {
-                return false;
-            }
             try {
-                const r = await fetch("/search_phrase_detayli.ajx", {
+                const r = await fetch("/kullanici_bilgileri.uyap", {
                     method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({yargiTuru: "1", durum: "1"})
+                    headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
+                    body: "{}"
                 });
-                if (!r.ok) return false;
-                const data = await r.json();
-                if (data && data.errorCode) return false;
-                return true;
-            } catch (e) {
+                const ct = r.headers.get("content-type") || "";
+                if (!r.ok || ct.includes("text/html")) return false;
+                const d = await r.json().catch(() => null);
+                return Boolean(d && (d.tcKimlikNo || d.tckn));
+            } catch(e) {
                 return false;
             }
         })()
@@ -833,44 +828,25 @@ class UyapBrowserBridge:
         js = """
         (async () => {
             const url = window.location.href;
-            if (url.includes("/giris") || !url.includes("/main/")) {
-                sessionStorage.removeItem("kullanici");
-                localStorage.removeItem("loginState");
-                return {
-                    url: url,
-                    loginState: "false",
-                    user: null,
-                    title: document.title
-                };
-            }
             let user = null;
             try {
-                // Sunucu oturumunu doğrula
-                const r = await fetch("/avukatKisiselBilgileriSorgula.ajx", {
+                const r = await fetch("/kullanici_bilgileri.uyap", {
                     method: "POST",
                     headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
                     body: "{}"
                 });
-                if (r.ok) {
-                    const d = await r.json();
-                    if (d && !d.errorCode) {
-                        if (Array.isArray(d) && d[0] && d[0].tcKimlikNo) {
-                            user = d[0];
-                        } else if (d && d.tcKimlikNo) {
-                            user = d;
-                        }
-                    }
-                    if (user) {
+                const ct = r.headers.get("content-type") || "";
+                if (r.ok && !ct.includes("text/html")) {
+                    const d = await r.json().catch(() => null);
+                    if (d && (d.tcKimlikNo || d.tckn)) {
+                        user = d;
                         sessionStorage.setItem("kullanici", JSON.stringify(user));
                         localStorage.setItem("loginState", "true");
-                    } else {
-                        sessionStorage.removeItem("kullanici");
-                        localStorage.removeItem("loginState");
                     }
-                } else {
+                }
+                if (!user) {
                     sessionStorage.removeItem("kullanici");
                     localStorage.removeItem("loginState");
-                    user = null;
                 }
             } catch (e) {
                 user = null;
