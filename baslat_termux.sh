@@ -56,11 +56,23 @@ case "$secim" in
             *) tur="durusma" ;;
         esac
 
+        echo ""
+        echo "  Dosya Kapsamı:"
+        echo "    1) Tüm Dosyalar (Açık + Kapalı / Karara Çıkmış - 700+ Dosya) [Önerilen]"
+        echo "    2) Yalnızca Açık / Derdest Dosyalar"
+        echo "    3) Sık Kullanılan Dosyalar (32 Dosya - Hızlı)"
+        read -p "  Seçiminiz (1-3) [Varsayılan: 1]: " scope_sec
+        case "$scope_sec" in
+            2) scope="acik" ;;
+            3) scope="fav" ;;
+            *) scope="all" ;;
+        esac
+
         read -p "Evrak ekleri (attachments) de indirilsin mi? (e/H): " ek_sec
         read -p "Başlangıç Tarihi Filtresi (İsteğe bağlı GG.AA.YYYY): " start_d
         read -p "Bitiş Tarihi Filtresi     (İsteğe bağlı GG.AA.YYYY): " end_d
 
-        args=("--cli" "--mode" "dosyalar" "--evrak-turu" "$tur")
+        args=("--cli" "--mode" "dosyalar" "--evrak-turu" "$tur" "--scope" "$scope")
         if [[ "$ek_sec" =~ ^[eEyY]$ ]]; then
             args+=("--include-attachments")
         fi
@@ -75,9 +87,20 @@ case "$secim" in
     4)
         echo ""
         echo "[*] Dava Dosyalarından TÜM Evraklar ve EKLERİ İndiriliyor (Tam Arşiv)..."
+        echo "  Dosya Kapsamı:"
+        echo "    1) Tüm Dosyalar (Açık + Kapalı / Karara Çıkmış - 700+ Dosya) [Önerilen]"
+        echo "    2) Yalnızca Açık / Derdest Dosyalar"
+        echo "    3) Sık Kullanılan Dosyalar (32 Dosya - Hızlı)"
+        read -p "  Seçiminiz (1-3) [Varsayılan: 1]: " scope_sec
+        case "$scope_sec" in
+            2) scope="acik" ;;
+            3) scope="fav" ;;
+            *) scope="all" ;;
+        esac
+
         read -p "Başlangıç Tarihi Filtresi (İsteğe bağlı GG.AA.YYYY): " start_d
         read -p "Bitiş Tarihi Filtresi     (İsteğe bağlı GG.AA.YYYY): " end_d
-        args=("--cli" "--mode" "dosyalar" "--evrak-turu" "tumu" "--include-attachments")
+        args=("--cli" "--mode" "dosyalar" "--evrak-turu" "tumu" "--include-attachments" "--scope" "$scope")
         if [ -n "$start_d" ]; then
             args+=("--start-date" "$start_d")
         fi

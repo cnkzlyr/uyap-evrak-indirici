@@ -84,13 +84,16 @@ Seçiminiz (1-7) [Varsayılan: 1]:
 
 ### 1. Dava Dosyalarından Belirli Evrakları İndirme
 ```bash
-# Tüm dosyalardaki Duruşma Tutanaklarını indir:
-python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma
+# Tüm dosyalardaki (Açık + Kapalı / Karara Çıkmış 700+ Dosya) Duruşma Tutanaklarını indir:
+python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma --scope all
 
-# Bilirkişi Raporlarını ve eklerini indir:
-python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu bilirkisi --include-attachments
+# Yalnızca açık dosyalardaki Bilirkişi Raporlarını ve eklerini indir:
+python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu bilirkisi --include-attachments --scope acik
 
-# Belirli bir tarih aralığındaki Gerekçeli Kararları indir:
+# Sık kullanılan dosyalardaki Duruşma Tutanaklarını indir (Hızlı):
+python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma --scope fav
+
+# Belirli bir tarih aralığındaki Gerekçeli Kararları indir (Açık + Kapalı):
 python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu karar --start-date 01.01.2023 --end-date 13.11.2026
 
 # Tüm dava evraklarını ve eklerini eksiksiz indir:

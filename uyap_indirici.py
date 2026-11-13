@@ -938,6 +938,106 @@ class UyapBrowserBridge:
         """
         return self.eval_js(js, timeout=90.0) or []
 
+    def query_tum_dosyalar(self, include_closed: bool = True, use_cache: bool = True) -> list:
+        """
+        Tüm yargı türlerindeki AÇIK ve KAPALI (Karara Çıkmış / Arşiv) dava dosyalarını
+        paralel ve optimize şekilde UYAP search_phrase_detayli servisinden çeker.
+        """
+        cache_file = BASE_DIR / "tum_dosyalar_cache.json"
+        if use_cache and cache_file.exists():
+            try:
+                cdata = json.loads(cache_file.read_text(encoding="utf-8"))
+                if (time.time() - cdata.get("timestamp", 0)) < 43200 and isinstance(cdata.get("cases"), list):
+                    cached_cases = cdata["cases"]
+                    if not include_closed:
+                        cached_cases = [c for c in cached_cases if c.get("dosyaDurumGenel") == "Açık" or "açık" in str(c.get("dosyaDurum", "")).lower()]
+                    return cached_cases
+            except Exception:
+                pass
+
+        durum_vals = [1, 0] if include_closed else [1]
+        js = f"""
+        (async () => {{
+            const birimler = [
+                ["0", "0901"], ["0", "0921"], ["0", "7702"], ["0", "0929"], ["0", "0911"],
+                ["0", "0914"], ["0", "0924"], ["0", "0915"], ["0", "0931"],
+                ["1", "0926"], ["1", "0920"], ["1", "0902"], ["1", "7710"], ["1", "7703"],
+                ["1", "0913"], ["1", "0925"], ["1", "0908"], ["1", "0907"], ["1", "0906"],
+                ["1", "0904"], ["1", "0912"],
+                ["2", "1101"],
+                ["6", "0917"], ["6", "0918"], ["6", "0919"],
+                ["11", "9791"],
+                ["25", "6701"]
+            ];
+            const durumlar = {json.dumps(durum_vals)};
+
+            let tasks = [];
+            for (let [y_tur, b_tur] of birimler) {{
+                for (let durum of durumlar) {{
+                    tasks.push((async () => {{
+                        try {{
+                            let resp = await fetch("/search_phrase_detayli.ajx", {{
+                                method: "POST",
+                                headers: {{"Content-Type": "application/json"}},
+                                body: JSON.stringify({{
+                                    dosyaDurumKod: durum,
+                                    birimTuru3: y_tur,
+                                    birimTuru2: b_tur,
+                                    pageSize: 200,
+                                    pageNumber: 1
+                                }})
+                            }});
+                            if (!resp.ok) return [];
+                            let d = await resp.json();
+                            if (Array.isArray(d) && Array.isArray(d[0])) {{
+                                return d[0].map(x => ({{...x, dosyaDurumGenel: durum === 1 ? "Açık" : "Kapalı"}}));
+                            }}
+                            return [];
+                        }} catch (e) {{
+                            return [];
+                        }}
+                    }})());
+                }}
+            }}
+
+            tasks.push((async () => {{
+                try {{
+                    let resp = await fetch("/avukat_dosya_sorgula_cbs_brd.ajx", {{
+                        method: "POST",
+                        headers: {{"Content-Type": "application/json"}},
+                        body: JSON.stringify({{dosyaDurumKod: 1, pageSize: 200, pageNumber: 1}})
+                    }});
+                    let d = await resp.json();
+                    return (Array.isArray(d) && Array.isArray(d[0])) ? d[0] : [];
+                }} catch (e) {{ return []; }}
+            }})());
+
+            let results = await Promise.all(tasks);
+            let allCases = [];
+            let seen = new Set();
+            for (let list of results) {{
+                for (let c of list) {{
+                    let id = c.dosyaId || c.dosyaID;
+                    if (id && !seen.has(id)) {{
+                        seen.add(id);
+                        allCases.push(c);
+                    }}
+                }}
+            }}
+            return allCases;
+        }})()
+        """
+        cases = self.eval_js(js, timeout=45.0) or []
+        if cases and include_closed:
+            try:
+                cache_file.write_text(
+                    json.dumps({"timestamp": time.time(), "cases": cases}, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
+            except Exception:
+                pass
+        return cases
+
     def query_durusmalar(self, start_date_str: str, end_date_str: str) -> list:
         """avukat_durusma_sorgula_brd.ajx ile belirli tarih aralığındaki duruşmaları çeker."""
         js = f"""
@@ -2274,13 +2374,26 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
     print(f"\n[*] Hedef Evrak Türü: {filter_desc}")
 
-    print("[*] UYAP portalınızdaki aktif dava dosyaları sorgulanıyor...")
-    cases = bridge.query_sik_kullanilan_dosyalar()
+    scope = getattr(args, "scope", "all").strip().lower()
+    include_closed = getattr(args, "include_closed", True)
+    if scope == "acik":
+        include_closed = False
+
+    if scope == "fav":
+        print("[*] Sık kullanılan aktif dosyalarınız sorgulanıyor...")
+        cases = bridge.query_sik_kullanilan_dosyalar()
+    else:
+        durum_str = "Tüm Dava Dosyaları (Açık + Kapalı / Karara Çıkmış)" if include_closed else "Yalnızca Açık Dava Dosyaları"
+        print(f"[*] {durum_str} sorgulanıyor...")
+        cases = bridge.query_tum_dosyalar(include_closed=include_closed)
+
     if not cases:
         print("[!] UYAP'ta dosya listesi alınamadı veya oturum kapalı.")
         return
 
-    print(f"[✓] Toplam {len(cases)} adet aktif dosya tespit edildi.")
+    acik_c = sum(1 for c in cases if c.get("dosyaDurumGenel") == "Açık" or "açık" in str(c.get("dosyaDurum", "")).lower())
+    kapali_c = len(cases) - acik_c
+    print(f"[✓] Toplam {len(cases)} adet dosya tespit edildi ({acik_c} Açık, {kapali_c} Kapalı).")
     print("[*] Dosyaların evrak listeleri taranıyor...\n")
 
     found_documents = []
@@ -3288,6 +3401,9 @@ def main():
     parser.add_argument("--mode", type=str, default="islemlerim", choices=["islemlerim", "dosyalar", "durusmalar"], help="Çalışma modu: islemlerim, dosyalar (dava dosyası evrakları), durusmalar (duruşma takvimi)")
     parser.add_argument("--evrak-turu", type=str, default="", help="Dava dosyalarından indirilecek evrak türü (durusma, bilirkisi, karar, tensip, tumu veya serbest arama)")
     parser.add_argument("--include-attachments", action="store_true", help="Evrakların ek belgelerini de indir")
+    parser.add_argument("--scope", type=str, default="all", choices=["all", "acik", "fav"], help="Taranacak dosya kapsamı: all (Açık + Kapalı - 700+ Dosya), acik (Yalnızca Açık), fav (Sık Kullanılanlar)")
+    parser.add_argument("--include-closed", action="store_true", default=True, help="Kapalı/Karara Çıkmış dosyaları da dahil et (varsayılan: True)")
+    parser.add_argument("--no-closed", dest="include_closed", action="store_false", help="Kapalı dosyaları tarama dışı bırak")
 
     args = parser.parse_args()
 
