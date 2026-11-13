@@ -529,27 +529,33 @@ class UyapBrowserBridge:
             const url = window.location.href;
             let user = null;
             try {
-                const raw = sessionStorage.getItem("kullanici");
-                if (raw) user = JSON.parse(raw);
-            } catch (e) {}
-            if (!user || !user.tcKimlikNo) {
-                try {
-                    const r = await fetch("/avukatKisiselBilgileriSorgula.ajx", {
-                        method: "POST",
-                        headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
-                        body: JSON.stringify({})
-                    });
-                    if (r.ok) {
-                        const d = await r.json();
-                        if (d && Array.isArray(d) && d[0] && d[0].tcKimlikNo) {
-                            user = d[0];
-                        } else if (d && d.tcKimlikNo) {
-                            user = d;
-                        }
+                // Sunucu oturumunu doğrula (401 / nosessionobject kontrolü)
+                const r = await fetch("/avukatKisiselBilgileriSorgula.ajx", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
+                    body: "{}"
+                });
+                if (r.ok) {
+                    const d = await r.json();
+                    if (d && Array.isArray(d) && d[0] && d[0].tcKimlikNo) {
+                        user = d[0];
+                    } else if (d && d.tcKimlikNo) {
+                        user = d;
                     }
-                } catch (e) {}
+                    if (user) {
+                        sessionStorage.setItem("kullanici", JSON.stringify(user));
+                        localStorage.setItem("loginState", "true");
+                    }
+                } else {
+                    // Sunucu oturumu düşmüş
+                    sessionStorage.removeItem("kullanici");
+                    localStorage.removeItem("loginState");
+                    user = null;
+                }
+            } catch (e) {
+                user = null;
             }
-            const loginState = localStorage.getItem("loginState");
+            const loginState = user ? "true" : "false";
             return {
                 url,
                 loginState,
@@ -2301,16 +2307,64 @@ def run_cli_mode(args):
     for idx, (s_d, e_d) in enumerate(ranges, start=1):
         s_str = s_d.strftime("%d.%m.%Y")
         e_str = e_d.strftime("%d.%m.%Y")
-        resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
 
-        if not resp.get("ok") or resp.get("status") in (401, 403):
-            if auto_relogin and pin:
-                bridge.auto_relogin(pin=pin)
-                time.sleep(2.0)
-                resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
+        while True:
+            resp = bridge.query_uyap_islemlerim(tckn, s_str, e_str, islem_turu=None)
+            raw_text = str(resp.get("rawText", "")).lower()
+
+            need_relogin = (
+                not resp.get("ok")
+                or resp.get("status") in (401, 403)
+                or "nosessionobject" in raw_text
+                or "oturum" in raw_text
+            )
+
+            if need_relogin:
+                print(f"\n[!] UYARI: UYAP oturum süresi doldu (HTTP {resp.get('status', '401')}).")
+                if auto_relogin and pin:
+                    print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
+                    re_ok, re_msg = bridge.auto_relogin(pin=pin)
+                    if re_ok:
+                        print(f"[✓] {re_msg}")
+                        time.sleep(1.5)
+                        continue
+                    else:
+                        print(f"[x] e-İmza yenileme başarısız: {re_msg}")
+
+                cfg = load_user_config()
+                c_tc = cfg.get("tc", tckn)
+                c_gsm = cfg.get("gsm", "")
+                c_op = cfg.get("operator", "2")
+                if c_tc and c_gsm:
+                    print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
+                    m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
+                    if m_ok:
+                        print(f"[✓] {m_msg}")
+                        time.sleep(2.0)
+                        u_info = bridge.check_login_and_user()
+                        user = u_info.get("user") or {}
+                        tckn = str(user.get("tcKimlikNo") or user.get("tckn") or tckn)
+                        continue
+                    else:
+                        print(f"[x] Mobil İmza yenileme başarısız: {m_msg}")
+
+                print("[!] Lütfen UYAP'a giriş yapınız, oturum bekleniyor...")
+                while True:
+                    time.sleep(3.0)
+                    u_info = bridge.check_login_and_user()
+                    if u_info.get("user", {}).get("tcKimlikNo"):
+                        user = u_info["user"]
+                        tckn = str(user.get("tcKimlikNo") or tckn)
+                        print("[✓] Oturum algılandı. Taramaya devam ediliyor...")
+                        break
+                continue
+
+            break
 
         rows = resp.get("data")
         if isinstance(rows, dict):
+            if rows.get("error") or rows.get("errorCode"):
+                print(f"  [!] UYAP Uyarısı ({s_str} - {e_str}): {rows.get('error') or rows.get('errorCode')}")
             rows = rows.get("data") or rows.get("list") or []
         if not isinstance(rows, list):
             rows = []
@@ -2429,6 +2483,17 @@ def run_cli_mode(args):
                         print(f"[x] Otomatik giriş başarısız: {re_msg}")
                         time.sleep(3.0)
                 elif attempt < max_retries:
+                    cfg = load_user_config()
+                    c_tc = cfg.get("tc", "")
+                    c_gsm = cfg.get("gsm", "")
+                    c_op = cfg.get("operator", "2")
+                    if c_tc and c_gsm:
+                        print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
+                        m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
+                        if m_ok:
+                            print(f"[✓] {m_msg}. Evrak tekrar deneniyor...")
+                            time.sleep(2.0)
+                            continue
                     print("[!] Lütfen UYAP oturumunuzu kontrol edin/yenileyin (Mobil İmza / e-İmza)...")
                     time.sleep(5.0)
                     continue
