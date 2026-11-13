@@ -39,17 +39,23 @@ case "$secim" in
     3)
         echo ""
         echo "[*] Dava Dosyalarından Belirli Evrak İndirme Seçildi"
-        echo "  1) Duruşma Tutanakları / Zabıtları"
-        echo "  2) Bilirkişi Raporları"
-        echo "  3) Gerekçeli Karar ve Hükümler"
-        echo "  4) Tensip Zaptı"
-        echo "  5) Özel Evrak Türü / Serbest Kelime Arama"
-        read -p "Seçiminiz (1-5) [Varsayılan: 1]: " ev_sec
+        echo "  1) Duruşma Tutanakları / Zabıtları (Asıl + Talimat, Celse Zabıtları, SEGBİS) [Önerilen]"
+        echo "  2) Bilirkişi Raporları (Kök + Ek Rapor, Uzman Görüşü, Adli Tıp / Kriminal)"
+        echo "  3) Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)"
+        echo "  4) Tensip Zabıtları (İlk + Talimat Tensip Zaptı)"
+        echo "  5) Dilekçeler ve Beyanlar (Dava, Cevap, İtiraz, İstinaf, Temyiz, Beyan, Mazeret)"
+        echo "  6) İddianame ve Fezleke (Ceza Soruşturma / Kovuşturma)"
+        echo "  7) Kesinleşme Şerhleri"
+        echo "  8) Özel Evrak Türü / Serbest Kelime Arama"
+        read -p "Seçiminiz (1-8) [Varsayılan: 1]: " ev_sec
         case "$ev_sec" in
             2) tur="bilirkisi" ;;
             3) tur="karar" ;;
             4) tur="tensip" ;;
-            5)
+            5) tur="dilekce" ;;
+            6) tur="iddianame" ;;
+            7) tur="kesinlesme" ;;
+            8)
                 read -p "Aramak istediğiniz evrak türü / kelime: " custom_tur
                 tur="${custom_tur:-durusma}"
                 ;;

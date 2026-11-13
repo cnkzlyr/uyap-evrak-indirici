@@ -83,8 +83,18 @@ Seçiminiz (1-7) [Varsayılan: 1]:
 ## 💻 Komut Satırı (CLI) Kullanım Örnekleri
 
 ### 1. Dava Dosyalarından Belirli Evrakları İndirme
+Desteklenen Evrak Filtreleri (`--evrak-turu`):
+- `durusma`: Duruşma Tutanakları / Zabıtları (Asıl + Talimat, Celse Zabıtları, SEGBİS)
+- `bilirkisi`: Bilirkişi Raporları (Kök + Ek Rapor, Uzman Görüşü, ATK / Adli Tıp, Kriminal)
+- `karar`: Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)
+- `tensip`: Tensip Zabıtları (İlk + Talimat Tensip Zaptı)
+- `dilekce`: Dilekçeler ve Beyanlar (Dava, Cevap, İtiraz, İstinaf, Temyiz, Beyan, Mazeret)
+- `iddianame`: İddianame ve Fezleke (Ceza Soruşturma / Kovuşturma)
+- `kesinlesme`: Kesinleşme Şerhleri
+- `tumu`: TÜM Evraklar ve Ek Belgeler (Toplu Eksiksiz Arşiv)
+
 ```bash
-# Tüm dosyalardaki (Açık + Kapalı / Karara Çıkmış 700+ Dosya) Duruşma Tutanaklarını indir:
+# Tüm dosyalardaki (Açık + Kapalı / Karara Çıkmış 700+ Dosya) Duruşma Tutanaklarını indir (Mükerrerlik elenir):
 python3 uyap_indirici.py --cli --mode dosyalar --evrak-turu durusma --scope all
 
 # Yalnızca açık dosyalardaki Bilirkişi Raporlarını ve eklerini indir:

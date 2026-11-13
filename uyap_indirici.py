@@ -145,6 +145,92 @@ def sanitize_path_part(value: str, default: str = "Belirtilmemis", max_len: int 
 slugify_filename = sanitize_path_part
 
 
+def tr_lower(text: str) -> str:
+    """Türkçe İ/ı, Ş/ş, Ğ/ğ, Ü/ü, Ö/ö, Ç/ç harflerini Unicode standardında küçük harfe dönüştürür."""
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace("İ", "i")
+        .replace("I", "ı")
+        .replace("Ş", "ş")
+        .replace("Ğ", "ğ")
+        .replace("Ü", "ü")
+        .replace("Ö", "ö")
+        .replace("Ç", "ç")
+        .lower()
+    )
+
+
+def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
+    """
+    UYAP'taki tarihsel ve mahkeme bazlı evrak adı çeşitliliklerini dikkate alarak
+    kesin pozitif ve negatif filtreleme yapar. Mükerrer veya yanlış evrakları eler.
+    """
+    if not tur_name:
+        return False
+    tn = tr_lower(tur_name)
+    ft = tr_lower(filter_type)
+
+    if ft in ("tumu", "all", "*"):
+        return True
+
+    if ft == "durusma":
+        is_d = any(k in tn for k in ("duruşma", "durusma", "celse zaptı", "celse zabti", "celse tutana", "segbis"))
+        is_ex = any(k in tn for k in (
+            "tensip", "zaptolunan", "arama", "yakalama", "kura", "tevzi", "teslim",
+            "tesellüm", "emanet", "diğer tutanak", "diger tutanak", "ifade", "sorgu",
+            "ihzar", "otopsi", "muayene", "adli kontrol tutana"
+        ))
+        return is_d and not is_ex
+
+    if ft == "bilirkisi":
+        is_b = any(k in tn for k in (
+            "bilirkişi rapor", "bilirkisi rapor", "ek rapor", "uzman rapor",
+            "uzman görüş", "uzman gorus", "adli tıp", "adli tip", "atk rapor",
+            "kriminal", "grafoloji", "hesap rapor", "mali müşavir", "mali musavir",
+            "bilirkişi heyet", "bilirkisi heyet", "inceleme rapor", "uyuşturucu inceleme", "uyusturucu inceleme"
+        ))
+        is_ex = any(k in tn for k in (
+            "ücret", "ucret", "sarf", "teslim", "yemin", "tevdi", "süre talebi",
+            "sure talebi", "çekilme", "cekilme", "itiraz", "tebliğ", "teblig"
+        ))
+        return is_b and not is_ex
+
+    if ft == "karar":
+        is_k = any(k in tn for k in (
+            "gerekçeli karar", "gerekceli karar", "hüküm", "hukum", "kısa karar", "kisa karar",
+            "ara karar", "ek karar", "ilam", "istinaf kararı", "istinaf karari", "bam kararı",
+            "bam karari", "yargıtay kararı", "yargitay karari", "danıştay kararı", "danistay karari",
+            "takipsizlik", "kyok", "yetkisizlik kararı", "yetkisizlik karari", "görevsizlik kararı",
+            "gorevsizlik karari", "tefrik kararı", "tefrik karari", "birleştirme kararı",
+            "birlestirme karari", "nihai karar"
+        ))
+        is_ex = any(k in tn for k in (
+            "tebliğ", "teblig", "mazbata", "masraf", "harç", "harc", "itiraz", "temyiz",
+            "başvuru", "basvuru"
+        ))
+        return is_k and not is_ex
+
+    if ft == "tensip":
+        return "tensip" in tn and not ("itiraz" in tn)
+
+    if ft == "dilekce":
+        is_dil = any(k in tn for k in (
+            "dilekçe", "dilekce", "beyan", "savunma", "vekaletname", "yetki belgesi",
+            "mazeret", "mütalaa", "mutalaa"
+        ))
+        return is_dil and not any(k in tn for k in ("tebliğ", "teblig", "mazbata"))
+
+    if ft == "iddianame":
+        return any(k in tn for k in ("iddianame", "fezleke")) and not ("iade" in tn)
+
+    if ft == "kesinlesme":
+        return "kesinleşme" in tn or "kesinlesme" in tn
+
+    return ft in tn
+
+
 def infer_dosya_turu(birim_adi: str, explicit_tur: str = "") -> str:
     """Birim adından veya açık dosya türünden anlamlı bir Dosya/Yargı Türü kategorisi çıkarır."""
     if explicit_tur and explicit_tur.strip():
@@ -2333,15 +2419,18 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
     if not evrak_filter:
         print("[*] İndirmek istediğiniz evrak türünü seçiniz:")
-        print("  1) Duruşma Tutanakları / Zabıtları (Önerilen)")
-        print("  2) Bilirkişi Raporları")
-        print("  3) Gerekçeli Karar ve Hükümler")
-        print("  4) Tensip Zaptı")
-        print("  5) Tüm Evraklar ve Ekleri")
-        print("  6) Özel Kelime Arama (Serbest Metin)")
-        print("-" * 50)
+        print("  1) Duruşma Tutanakları / Zabıtları (Asıl + Talimat, Celse Zabıtları, SEGBİS) [Önerilen]")
+        print("  2) Bilirkişi Raporları (Kök + Ek Rapor, Uzman Görüşü, Adli Tıp / Kriminal)")
+        print("  3) Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)")
+        print("  4) Tensip Zabıtları (İlk Tensip, Talimat Tensip Zaptı)")
+        print("  5) Dilekçeler ve Beyanlar (Dava, Cevap, İtiraz, İstinaf, Temyiz, Beyan, Mazeret)")
+        print("  6) İddianame ve Ceza Başvuru Evrakları (İddianame, Fezleke, İddianame Kabul)")
+        print("  7) Kesinleşme Şerhleri")
+        print("  8) TÜM Evraklar ve Ekleri (Toplu Eksiksiz Arşiv)")
+        print("  9) Özel Kelime Arama (Serbest Metin)")
+        print("-" * 65)
         try:
-            sec = input("Seçiminiz (1-6) [Varsayılan: 1]: ").strip() or "1"
+            sec = input("Seçiminiz (1-9) [Varsayılan: 1]: ").strip() or "1"
         except (EOFError, KeyboardInterrupt):
             sec = "1"
 
@@ -2354,9 +2443,15 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         elif sec == "4":
             evrak_filter = "tensip"
         elif sec == "5":
+            evrak_filter = "dilekce"
+        elif sec == "6":
+            evrak_filter = "iddianame"
+        elif sec == "7":
+            evrak_filter = "kesinlesme"
+        elif sec == "8":
             evrak_filter = "tumu"
             include_attachments = True
-        elif sec == "6":
+        elif sec == "9":
             try:
                 evrak_filter = input("Aramak istediğiniz evrak türü / kelime: ").strip().lower()
             except Exception:
@@ -2365,11 +2460,14 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
             evrak_filter = "durusma"
 
     filter_desc = {
-        "durusma": "Duruşma Tutanakları (Zabıtlar)",
-        "bilirkisi": "Bilirkişi Raporları",
-        "karar": "Gerekçeli Karar ve Hükümler",
-        "tensip": "Tensip Zaptı",
-        "tumu": "Tüm Evraklar ve Ek Belgeler",
+        "durusma": "Duruşma Tutanakları (Zabıtlar, Celse Zabıtları, SEGBİS)",
+        "bilirkisi": "Bilirkişi Raporları (Kök + Ek + Adli Tıp / Kriminal)",
+        "karar": "Gerekçeli Karar, Hüküm ve İlamlar (BAM / Yargıtay)",
+        "tensip": "Tensip Zabıtları (İlk + Talimat Tensip)",
+        "dilekce": "Dilekçeler ve Beyanlar (Dava, Cevap, İstinaf, Temyiz)",
+        "iddianame": "İddianame ve Fezleke",
+        "kesinlesme": "Kesinleşme Şerhleri",
+        "tumu": "Tüm Evraklar ve Ek Belgeler (Toplu Tam Arşiv)",
     }.get(evrak_filter, f"'{evrak_filter}' içeren evraklar")
 
     print(f"\n[*] Hedef Evrak Türü: {filter_desc}")
@@ -2398,22 +2496,9 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
     found_documents = []
     seen_keys = set()
-
-    def matches_filter(tur_name):
-        if not tur_name:
-            return False
-        tn = str(tur_name).lower()
-        if evrak_filter in ("tumu", "all", "*"):
-            return True
-        if evrak_filter == "durusma":
-            return any(k in tn for k in ("duruşma", "durusma", "zapt", "zabit", "tutanak"))
-        if evrak_filter == "bilirkisi":
-            return any(k in tn for k in ("bilirkişi", "bilirkisi", "rapor"))
-        if evrak_filter == "karar":
-            return any(k in tn for k in ("karar", "gerekçeli", "gerekceli", "hüküm", "hukum"))
-        if evrak_filter == "tensip":
-            return "tensip" in tn
-        return evrak_filter in tn
+    seen_hearings = set()
+    seen_evrak_ids = set()
+    total_skipped_duplicates = 0
 
     for c_idx, c in enumerate(cases, start=1):
         dosya_id = str(c.get("dosyaID") or c.get("dosyaId") or "").strip()
@@ -2431,76 +2516,113 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
         case_found = 0
 
-        def collect_doc(ev, is_attachment=False, parent_tur=""):
-            nonlocal case_found
+        def collect_doc(ev, is_attachment=False, parent_tur="", p_yer="", p_dosya="", p_tarih_obj=None):
+            nonlocal case_found, total_skipped_duplicates
             if not isinstance(ev, dict):
                 return
             ev_id = str(ev.get("evrakId") or "").strip()
-            if not ev_id:
+            if not ev_id or ev_id in seen_evrak_ids:
                 return
 
             tur = str(ev.get("ekTuru") if is_attachment else (ev.get("tur") or ev.get("aciklama") or "Evrak")).strip()
-            if not (matches_filter(tur) or (is_attachment and include_attachments and matches_filter(parent_tur))):
-                for ek in ev.get("ekEvrakListesi") or []:
-                    collect_doc(ek, is_attachment=True, parent_tur=tur)
-                return
+            yer = str(ev.get("gonderenYerKisi") or p_yer or birim_adi).strip()
+            dno = str(ev.get("gonderenDosyaNo") or p_dosya or dosya_no).strip()
 
             p_date = (
                 parse_uyap_date(ev.get("onaylandigiTarih"))
                 or parse_uyap_date(ev.get("sistemeGonderildigiTarih"))
+                or p_tarih_obj
                 or dt.date.today()
             )
+            tarih_str = p_date.strftime("%d.%m.%Y")
 
-            if getattr(args, "start_date", None):
-                try:
-                    s_limit = dt.datetime.strptime(args.start_date, "%d.%m.%Y").date()
-                    if p_date < s_limit:
+            is_match = matches_evrak_filter(tur, evrak_filter) or (
+                is_attachment and include_attachments and matches_evrak_filter(parent_tur, evrak_filter)
+            )
+
+            if is_match:
+                if getattr(args, "start_date", None):
+                    try:
+                        s_limit = dt.datetime.strptime(args.start_date, "%d.%m.%Y").date()
+                        if p_date < s_limit:
+                            return
+                    except Exception:
+                        pass
+                if getattr(args, "end_date", None):
+                    try:
+                        e_limit = dt.datetime.strptime(args.end_date, "%d.%m.%Y").date()
+                        if p_date > e_limit:
+                            return
+                    except Exception:
+                        pass
+
+                # Mükerrer / Kopya Evrak Kontrolü:
+                # Özellikle mahkemeler arası talimat, müzekkere ekinde gelen suretler veya
+                # birleşen dosyalarda aynı celse / kararın mükerrer indirilmesini önler.
+                if evrak_filter == "durusma":
+                    dedup_key = f"{sanitize_path_part(yer).lower()}::{sanitize_path_part(dno).lower()}::{tarih_str}"
+                    if dedup_key in seen_hearings:
+                        total_skipped_duplicates += 1
                         return
-                except Exception:
-                    pass
-            if getattr(args, "end_date", None):
-                try:
-                    e_limit = dt.datetime.strptime(args.end_date, "%d.%m.%Y").date()
-                    if p_date > e_limit:
+                    seen_hearings.add(dedup_key)
+                elif evrak_filter in ("karar", "tensip", "iddianame"):
+                    dedup_key = f"{evrak_filter}::{sanitize_path_part(yer).lower()}::{sanitize_path_part(dno).lower()}::{tarih_str}"
+                    if dedup_key in seen_hearings:
+                        total_skipped_duplicates += 1
                         return
-                except Exception:
-                    pass
+                    seen_hearings.add(dedup_key)
 
-            ukey = f"dosya_{dosya_id}_{ev_id}"
-            if ukey in seen_keys:
-                return
-            seen_keys.add(ukey)
+                seen_evrak_ids.add(ev_id)
+                ukey = f"dosya_{dosya_id}_{ev_id}"
+                if ukey in seen_keys:
+                    return
+                seen_keys.add(ukey)
 
-            item = {
-                "unique_key": ukey,
-                "kaynak": "Dava_Dosyasi",
-                "tarih_obj": p_date,
-                "tarih": p_date.strftime("%Y-%m-%d"),
-                "yil": p_date.strftime("%Y"),
-                "yil_ay": p_date.strftime("%Y-%m"),
-                "dosya_turu": infer_dosya_turu(birim_adi),
-                "birim_adi": birim_adi,
-                "dosya_no": dosya_no,
-                "dosya_id": dosya_id,
-                "islem_turu": "Dava_Evraki_Ek" if is_attachment else "Dava_Evraki",
-                "evrak_turu": tur,
-                "evrak_turu_kod": tur,
-                "evrak_adi": f"EK_{tur}" if is_attachment else tur,
-                "evrak_id": ev_id,
-                "gg_evrak_id": str(ev.get("ggEvrakId") or ""),
-                "is_emir_no": str(ev.get("birimEvrakNo") or ev.get("anaEvrakId") or ""),
-                "is_attachment": is_attachment,
-                "download_params": {
-                    "dosyaId": dosya_id,
-                    "evrakId": ev_id,
-                },
-                "can_download": True,
-            }
-            found_documents.append(item)
-            case_found += 1
+                # Evrak adını zenginleştir: Eğer celse bilgisi (örn: "6. Celse") varsa ekle
+                aciklama = str(ev.get("aciklama") or "").strip()
+                display_tur = tur
+                if aciklama and aciklama.lower() not in tur.lower():
+                    display_tur = f"{tur}_{aciklama}"
 
-            for ek in ev.get("ekEvrakListesi") or []:
-                collect_doc(ek, is_attachment=True, parent_tur=tur)
+                item = {
+                    "unique_key": ukey,
+                    "kaynak": "Dava_Dosyasi",
+                    "tarih_obj": p_date,
+                    "tarih": p_date.strftime("%Y-%m-%d"),
+                    "yil": p_date.strftime("%Y"),
+                    "yil_ay": p_date.strftime("%Y-%m"),
+                    "dosya_turu": infer_dosya_turu(birim_adi),
+                    "birim_adi": birim_adi,
+                    "dosya_no": dosya_no,
+                    "dosya_id": dosya_id,
+                    "islem_turu": "Dava_Evraki_Ek" if is_attachment else "Dava_Evraki",
+                    "evrak_turu": tur,
+                    "evrak_turu_kod": tur,
+                    "evrak_adi": f"EK_{display_tur}" if is_attachment else display_tur,
+                    "evrak_id": ev_id,
+                    "gg_evrak_id": str(ev.get("ggEvrakId") or ""),
+                    "is_emir_no": str(ev.get("birimEvrakNo") or ev.get("anaEvrakId") or ""),
+                    "is_attachment": is_attachment,
+                    "download_params": {
+                        "dosyaId": dosya_id,
+                        "evrakId": ev_id,
+                    },
+                    "can_download": True,
+                }
+                found_documents.append(item)
+                case_found += 1
+
+            # Evrak eklerini YALNIZCA kullanıcı özellikle talep etmişse (include_attachments=True) tara
+            if include_attachments:
+                for ek in ev.get("ekEvrakListesi") or []:
+                    collect_doc(
+                        ek,
+                        is_attachment=True,
+                        parent_tur=tur,
+                        p_yer=yer,
+                        p_dosya=dno,
+                        p_tarih_obj=p_date
+                    )
 
         for p in pages:
             if isinstance(p, dict):
@@ -2522,14 +2644,16 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
             time.sleep(random.uniform(0.3, 0.6))
 
     print("\n" + "=" * 70)
-    print(f"  TOPLAM BULUNAN HEDEF EVRAK : {len(found_documents)} adet")
+    print(f"  TOPLAM BULUNAN HEDEF EVRAK     : {len(found_documents)} adet")
+    if total_skipped_duplicates > 0:
+        print(f"  MÜKERRER / KOPYA EVRAK (ELENDİ): {total_skipped_duplicates} adet")
 
     download_queue = [
         it for it in found_documents if not app_helper.is_item_already_downloaded(it)
     ]
     skipped_count = len(found_documents) - len(download_queue)
-    print(f"  DİSKTE MEVCUT (ATLANDI)    : {skipped_count} adet")
-    print(f"  İNDİRİLECEK YENİ EVRAK     : {len(download_queue)} adet")
+    print(f"  DİSKTE MEVCUT (ATLANDI)        : {skipped_count} adet")
+    print(f"  İNDİRİLECEK YENİ EVRAK         : {len(download_queue)} adet")
     print("=" * 70 + "\n")
 
     if not download_queue:
@@ -2548,7 +2672,13 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
     sub_folder_name = "DURUSMA_TUTANAKLARI" if evrak_filter == "durusma" else (
         "BILIRKISI_RAPORLARI" if evrak_filter == "bilirkisi" else (
             "GEREKCELI_KARARLAR" if evrak_filter == "karar" else (
-                "TENSIP_ZAPITLARI" if evrak_filter == "tensip" else "DAVA_EVRAKLARI"
+                "TENSIP_ZAPITLARI" if evrak_filter == "tensip" else (
+                    "DILEKCELER_BEYANLAR" if evrak_filter == "dilekce" else (
+                        "IDDIANAMELER" if evrak_filter == "iddianame" else (
+                            "KESINLESME_SERHLERI" if evrak_filter == "kesinlesme" else "DAVA_EVRAKLARI"
+                        )
+                    )
+                )
             )
         )
     )
@@ -3399,7 +3529,7 @@ def main():
     parser.add_argument("--operator", type=str, default="", choices=["", "turktelekom", "turkcell", "vodafone", "1", "2", "3"], help="Mobil İmza operatörü (turktelekom, turkcell, vodafone)")
     parser.add_argument("--mobil-imza", action="store_true", help="Oturum yoksa doğrudan Mobil İmza akışını başlat")
     parser.add_argument("--mode", type=str, default="islemlerim", choices=["islemlerim", "dosyalar", "durusmalar"], help="Çalışma modu: islemlerim, dosyalar (dava dosyası evrakları), durusmalar (duruşma takvimi)")
-    parser.add_argument("--evrak-turu", type=str, default="", help="Dava dosyalarından indirilecek evrak türü (durusma, bilirkisi, karar, tensip, tumu veya serbest arama)")
+    parser.add_argument("--evrak-turu", type=str, default="", help="Dava dosyalarından indirilecek evrak türü (durusma, bilirkisi, karar, tensip, dilekce, iddianame, kesinlesme, tumu veya serbest metin)")
     parser.add_argument("--include-attachments", action="store_true", help="Evrakların ek belgelerini de indir")
     parser.add_argument("--scope", type=str, default="all", choices=["all", "acik", "fav"], help="Taranacak dosya kapsamı: all (Açık + Kapalı - 700+ Dosya), acik (Yalnızca Açık), fav (Sık Kullanılanlar)")
     parser.add_argument("--include-closed", action="store_true", default=True, help="Kapalı/Karara Çıkmış dosyaları da dahil et (varsayılan: True)")
