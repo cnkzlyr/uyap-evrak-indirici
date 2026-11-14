@@ -792,25 +792,31 @@ class KatalogApp:
         self.ui_q.put(("session", f"Oturum: açık ({ad})", True))
 
     def _relogin_worker(self) -> bool:
+        """Oturumu yeniler. Kayıtlı yöntem başarısız olursa (ör. kart okunamadı) kullanıcıya bir kez
+        daha sorar: kartı yeniden takıp tekrar deneyebilir veya Mobil İmza'ya geçebilir."""
         self.ui_q.put(("session", "Oturum: kapalı — giriş gerekiyor", False))
-        if not self.login_method and not self._ask_method_blocking():
-            return False
-        m = self.login_method
-        if m[0] == "eimza":
-            self.log("[*] e-İmza ile giriş yapılıyor...")
-            ok, msg = self.bridge.auto_relogin(m[1])
-            if not ok and "PIN" in msg.upper():
-                self.login_method = None  # yanlış PIN tekrar denenmez (kart blokesine karşı)
-        else:
-            self.log("[*] Mobil İmza ile giriş: telefonunuza gelen onayı verin...")
-            ok, msg = self.bridge.login_with_mobil_imza(m[1], m[2], m[3], status_cb=self.log)
-        self.log(("[✓] " if ok else "[x] ") + str(msg))
-        if ok:
-            info = self.bridge.check_login_and_user()
-            self._session_ok(info.get("user") or {})
-        else:
+        for deneme in range(2):
+            if not self.login_method and not self._ask_method_blocking():
+                return False
+            m = self.login_method
+            if m[0] == "eimza":
+                self.log("[*] e-İmza ile giriş yapılıyor...")
+                ok, msg = self.bridge.auto_relogin(m[1])
+            else:
+                self.log("[*] Mobil İmza ile giriş: telefonunuza gelen onayı verin...")
+                ok, msg = self.bridge.login_with_mobil_imza(m[1], m[2], m[3], status_cb=self.log)
+            self.log(("[✓] " if ok else "[x] ") + str(msg))
+            if ok:
+                info = self.bridge.check_login_and_user()
+                self._session_ok(info.get("user") or {})
+                return True
+            if "sertifika" in str(msg).lower() or "kart" in str(msg).lower():
+                self.log("[!] e-İmza kartı okunamadı: kartın takılı olduğunu kontrol edin, gerekirse okuyucuyu "
+                         "çıkarıp takın veya ArkSigner'ı yeniden başlatın. Ya da Mobil İmza'yı seçin.")
+            # Yanlış PIN tekrar denenmez (kart blokesine karşı); her durumda yöntemi yeniden sor
+            self.login_method = None
             self.ui_q.put(("session", "Oturum: kapalı", False))
-        return ok
+        return False
 
     def _ask_login(self, ark_ok: bool, ev: threading.Event, box: dict):
         cfg = self.ui.load_user_config()

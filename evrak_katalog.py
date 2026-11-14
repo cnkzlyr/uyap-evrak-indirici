@@ -178,6 +178,7 @@ class Katalog:
         if "tarama" not in cols:  # eski kataloglar için şema güncellemesi
             self.db.execute("ALTER TABLE dosya ADD COLUMN tarama TEXT")
             self.db.execute("UPDATE dosya SET tarama='tamam' WHERE evrak_sayisi > 0")
+        self.db.execute("UPDATE evrak SET hata=NULL WHERE hata='UYAP listesinde artık yok' AND durum='yeni'")
         ecols = {r[1] for r in self.db.execute("PRAGMA table_info(evrak)")}
         if "cache_path" not in ecols:
             self.db.execute("ALTER TABLE evrak ADD COLUMN cache_path TEXT")
@@ -1087,8 +1088,11 @@ class Motor:
         t0 = time.time()
         ok = self._refresh_case(dk)
         self.dbg("Dosya kimlikleri tazelendi: %s -> %s (%.1fs)", dk, ok, time.time() - t0)
-        if not ok and self._session_dead() and self._relogin():
-            ok = self._refresh_case(dk)
+        if not ok and self._session_dead():
+            if self._relogin():
+                ok = self._refresh_case(dk)
+            else:
+                self.stop_flag.set()  # giriş yapılamadı: kalan evrakları boşuna denemeden dur
         return self.kat.get(eid)
 
     def fetch(self, eid: int, refreshed: set | None = None) -> tuple:
@@ -1101,6 +1105,8 @@ class Motor:
         row = self._ensure_row_fresh(eid, refreshed)
         if not row:
             return None, {}, None, "kayıt yok"
+        if self.stop_flag.is_set():
+            return None, {}, row, "oturum yenilenemedi"
         if row["oturum"] != self.oturum:
             return None, {}, row, "UYAP listesinde artık yok"
         resp, reason = {}, ""
@@ -1242,7 +1248,10 @@ class Motor:
                 row = row2 or row
                 ext = self._ext_of(resp, raw) if raw is not None else ""
             if raw is None:
-                if self.stop_flag.is_set() and why in ("durduruldu", "oturum yenilenemedi"):
+                if why in ("durduruldu", "oturum yenilenemedi"):
+                    if why == "oturum yenilenemedi":
+                        self.log("[x] UYAP'a yeniden giriş yapılamadığı için indirme durduruldu. "
+                                 "Giriş yaptıktan sonra aynı filtreyle tekrar başlatın; kalan evraklar indirilecek.")
                     break
                 st = "yok" if why == "yok" else "hata"
                 stats[st] += 1
