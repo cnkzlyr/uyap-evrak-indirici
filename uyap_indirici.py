@@ -280,6 +280,8 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
             "gerekçeli karar", "gerekceli karar", "kısa karar", "kisa karar",
             "bilirkişi raporu", "bilirkisi raporu", "keşif zapt"
         )) and not any(k in tn for k in ("mazbata", "şerh", "serh", "parça", "parca", "uets", "e-tebligat", "elektronik"))
+        if "bilirkişi" in tn or "bilirkisi" in tn:
+            is_ex = True
         return is_teb and not is_ex
 
     if ft in ("muzekkere", "muzekkereler", "kurum_cevaplari"):
@@ -297,6 +299,12 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
     if ft == "kesinlesme":
         return "kesinleşme" in tn or "kesinlesme" in tn
 
+    try:
+        from evrak_turleri import KATEGORI_ADI, kategori_of
+        if ft in KATEGORI_ADI:
+            return kategori_of(tur_name) == ft
+    except ImportError:
+        pass
     return ft in tn
 
 
@@ -3280,6 +3288,14 @@ def dosya_item_on_disk(item: dict, keys: dict, same_day_ok: bool) -> str:
     return ""
 
 
+def _kategori_adi(kod: str) -> str:
+    try:
+        from evrak_turleri import KATEGORI_ADI
+        return KATEGORI_ADI.get(kod, "")
+    except ImportError:
+        return ""
+
+
 def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
     """
     Dava Dosyalarından Belirli Evrak Türlerini (Duruşma Tutanağı, Bilirkişi Raporu, Karar vb.)
@@ -3305,9 +3321,16 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         print("  9) Kesinleşme Şerhleri")
         print(" 10) TÜM Evraklar ve Ekleri (Toplu Eksiksiz Arşiv)")
         print(" 11) Özel Kelime Arama (Serbest Metin)")
+        print(" 12) Tutuklama / Adli Kontrol / Yakalama Evrakları")
+        print(" 13) İfade / Sorgu / Tutanak / Keşif")
+        print(" 14) Vekaletname / Yetki Belgesi")
+        print(" 15) İcra / Haciz / Satış")
+        print(" 16) Makbuz / Harç / Masraf / Reddiyat")
+        print(" 17) Talimat Yazışmaları")
         print("-" * 65)
+        print("[i] Daha ayrıntılı seçim (taraf, müvekkil, tarih, evrak türü...) için: python uyap_indirici.py --katalog")
         try:
-            sec = input("Seçiminiz (1-11) [Varsayılan: 1]: ").strip() or "1"
+            sec = input("Seçiminiz (1-17) [Varsayılan: 1]: ").strip() or "1"
         except (EOFError, KeyboardInterrupt):
             sec = "1"
 
@@ -3332,6 +3355,9 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         elif sec == "10":
             evrak_filter = "tumu"
             include_attachments = True
+        elif sec in ("12", "13", "14", "15", "16", "17"):
+            evrak_filter = {"12": "tutuklama", "13": "ifade", "14": "vekalet", "15": "icra",
+                            "16": "mali", "17": "talimat"}[sec]
         elif sec == "11":
             try:
                 evrak_filter = input("Aramak istediğiniz evrak türü / kelime: ").strip().lower()
@@ -3352,7 +3378,7 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         "iddianame": "İddianame ve Fezleke",
         "kesinlesme": "Kesinleşme Şerhleri",
         "tumu": "Tüm Evraklar ve Ek Belgeler (Toplu Tam Arşiv)",
-    }.get(evrak_filter, f"'{evrak_filter}' içeren evraklar")
+    }.get(evrak_filter) or _kategori_adi(evrak_filter) or f"'{evrak_filter}' içeren evraklar"
 
     print(f"\n[*] Hedef Evrak Türü: {filter_desc}")
 

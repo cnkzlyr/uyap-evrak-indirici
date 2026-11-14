@@ -92,47 +92,16 @@ def strip_ext(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Kategoriler (uyap_indirici.matches_evrak_filter kurallarıyla)
+# Kategoriler: gerçek UYAP evrak türlerinden çıkarılmış sınıflandırma (evrak_turleri.py)
 # ---------------------------------------------------------------------------
-KATEGORILER = [
-    ("durusma", "Duruşma Zaptı"),
-    ("karar", "Karar / Hüküm / İlam"),
-    ("bilirkisi", "Bilirkişi / Uzman Raporu"),
-    ("tensip", "Tensip Zaptı"),
-    ("iddianame", "İddianame / Fezleke"),
-    ("kesinlesme", "Kesinleşme"),
-    ("tebligat", "Tebligat / Mazbata"),
-    ("muzekkere", "Müzekkere / Kurum Cevabı"),
-    ("layihalar", "Dilekçe / Layiha / Beyan"),
-]
-KATEGORI_ADI = dict(KATEGORILER)
-KATEGORI_ADI["diger"] = "Diğer"
-KLASOR_ADI = {
-    "durusma": "DURUSMA_TUTANAKLARI", "karar": "KARARLAR", "bilirkisi": "BILIRKISI_RAPORLARI",
-    "tensip": "TENSIP_ZAPITLARI", "iddianame": "IDDIANAMELER", "kesinlesme": "KESINLESME",
-    "tebligat": "TEBLIGATLAR", "muzekkere": "MUZEKKERE_CEVAPLARI", "layihalar": "DILEKCELER",
-    "diger": "DIGER_EVRAKLAR",
-}
+from evrak_turleri import (  # noqa: E402
+    KATEGORILER, KATEGORI_ADI, KLASOR_ADI, kategori_of, ek_kategori_of,
+)
 
-_matcher = None
+__all__ = ["KATEGORILER", "KATEGORI_ADI", "KLASOR_ADI", "kategori_of", "ek_kategori_of", "Katalog", "Motor",
+           "export_csv", "fold", "iso_date", "DURUMLAR"]
 
-
-def kategori_of(tur: str) -> str:
-    global _matcher
-    if _matcher is None:
-        try:
-            from uyap_indirici import matches_evrak_filter as _m
-        except Exception:  # bağımsız kullanımda basit eşleştirme
-            def _m(t, f):
-                return f in fold(t)
-        _matcher = _m
-    for kod, _ad in KATEGORILER:
-        try:
-            if _matcher(tur, kod):
-                return kod
-        except Exception:
-            pass
-    return "diger"
+KATALOG_SURUMU = 2  # sınıflandırma değişince artırılır; açılışta kategoriler yeniden hesaplanır
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +131,7 @@ CREATE INDEX IF NOT EXISTS ix_e_durum ON evrak(durum);
 CREATE INDEX IF NOT EXISTS ix_e_sha ON evrak(sha256);
 CREATE INDEX IF NOT EXISTS ix_e_ad ON evrak(ad_anahtar);
 CREATE INDEX IF NOT EXISTS ix_e_parent ON evrak(parent_skey);
+CREATE INDEX IF NOT EXISTS ix_e_ust ON evrak(ust_tur);
 CREATE INDEX IF NOT EXISTS ix_ed_dkey ON evrak_dosya(dkey);
 CREATE VIRTUAL TABLE IF NOT EXISTS evrak_fts USING fts5(metin, tokenize="unicode61 remove_diacritics 2");
 """
@@ -187,6 +157,19 @@ class Katalog:
             self.db.execute("ALTER TABLE dosya ADD COLUMN tarama TEXT")
             self.db.execute("UPDATE dosya SET tarama='tamam' WHERE evrak_sayisi > 0")
         self.db.commit()
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < KATALOG_SURUMU:
+            self.reclassify()
+
+    def reclassify(self):
+        """Kategorileri güncel sınıflandırmayla tek geçişte yeniden hesaplar (tür adları önbellekli)."""
+        self.db.create_function("kat_of", 1, kategori_of, deterministic=True)
+        self.db.create_function("ek_kat_of", 2, ek_kategori_of, deterministic=True)
+        with self.db:
+            self.db.execute("""UPDATE evrak SET
+                  ust_tur = CASE WHEN is_ek=0 THEN tur ELSE ust_tur END,
+                  kategori = CASE WHEN is_ek=0 THEN kat_of(tur) ELSE ek_kat_of(tur, ust_tur) END,
+                  ust_kategori = kat_of(CASE WHEN is_ek=0 THEN tur ELSE ust_tur END)""")
+            self.db.execute(f"PRAGMA user_version={KATALOG_SURUMU}")
 
     def set_tarama(self, dkey: str, durum: str):
         with self.db:
@@ -294,7 +277,7 @@ class Katalog:
             gonderen = str(ev.get("gonderenYerKisi") or "")
             gdno = str(ev.get("gonderenDosyaNo") or "")
             rows.append((
-                skey, dkey, grup, 0, None, 0, tur, "", acik, tarih, str(ev.get("tip") or ""),
+                skey, dkey, grup, 0, None, 0, tur, tur, acik, tarih, str(ev.get("tip") or ""),
                 gonderen, gdno, str(ev.get("birimEvrakNo") or ""), gercek, kat, kat, ext_hint(tur) or "",
                 None, fold(" ".join((tur, acik, gonderen, gdno, grup))),
                 str(ev.get("evrakId") or ""), oturum, now, now,
@@ -310,7 +293,7 @@ class Katalog:
                 ad_key = f"F|{m.group(0)}" if m else None
                 rows.append((
                     ek_skey, dkey, grup, 1, skey, sira, ek_tur, tur, acik, tarih, "",
-                    gonderen, gdno, str(ev.get("birimEvrakNo") or ""), ana, kategori_of(ek_tur), kat,
+                    gonderen, gdno, str(ev.get("birimEvrakNo") or ""), ana, ek_kategori_of(ek_tur, tur), kat,
                     ext_hint(ek_tur), ad_key, fold(" ".join((ek_tur, tur, acik, gonderen, gdno, grup))),
                     str(ek.get("evrakId") or ""), oturum, now, now,
                 ))
@@ -474,6 +457,11 @@ class Katalog:
                 p.append((dt.date.today() - dt.timedelta(days=int(f["son_gun"]))).isoformat())
             except (TypeError, ValueError):
                 pass
+        turler = f.get("turler") or []
+        if turler:
+            ph = ",".join("?" * len(turler))
+            w.append(f"e.ust_tur {'NOT IN' if f.get('tur_secim_haric') else 'IN'} ({ph})")
+            p += list(turler)
         kats = f.get("kategoriler") or []
         if kats:
             col = "e.ust_kategori" if f.get("kategori_ust") else "e.kategori"
@@ -530,6 +518,15 @@ class Katalog:
         where, p = self.build_where(f)
         return [r[0] for r in self.db.execute(
             f"SELECT e.id {self._BASE_FROM} WHERE {where} ORDER BY e.dkey, e.tarih, e.parent_skey, e.sira", p)]
+
+    def tur_counts(self, f: dict) -> list:
+        """Asıl evrak türleri ve (filtreye göre) sayıları; ekler ait oldukları evrakın türünde sayılır."""
+        self._ensure_funcs()
+        g = dict(f)
+        g["turler"] = []
+        where, p = self.build_where(g)
+        return self.db.execute(
+            f"SELECT e.ust_tur, COUNT(*) {self._BASE_FROM} WHERE {where} GROUP BY e.ust_tur ORDER BY 2 DESC", p).fetchall()
 
     def category_counts(self, f: dict) -> dict:
         self._ensure_funcs()

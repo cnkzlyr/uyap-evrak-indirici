@@ -265,7 +265,7 @@ class KatalogApp:
         ttk.Button(qb, text="Temizle", width=8, command=lambda: [self.v[k].set("") for k in ("son_gun", "baslangic", "bitis")]).pack(side="left", padx=1)
 
         sec("Evrak kategorisi")
-        self.lb_kat = tk.Listbox(fp, selectmode="multiple", height=10, exportselection=False, width=40)
+        self.lb_kat = tk.Listbox(fp, selectmode="multiple", height=14, exportselection=False, width=40)
         self.lb_kat.grid(row=r, column=0, columnspan=3, sticky="we"); r += 1
         self.kat_codes = [k for k, _ in ek.KATEGORILER] + ["diger"]
         self.lb_kat.bind("<<ListboxSelect>>", lambda e: self.schedule_filter(0))
@@ -276,6 +276,33 @@ class KatalogApp:
         ttk.Radiobutton(kf, text="Seçilenleri hariç tut", variable=self.v["kategori_haric"], value=True, command=self.schedule_filter).pack(side="left")
         ttk.Checkbutton(fp, text="Eklerde ait olduğu evrakın kategorisine bak", variable=self.v["kategori_ust"],
                         command=self.schedule_filter).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+
+        sec("Evrak türü (UYAP'taki gerçek türler)")
+        ttk.Label(fp, text="Türlerde ara").grid(row=r, column=0, sticky="w")
+        self.v["tur_ara"] = tk.StringVar()
+        ttk.Entry(fp, textvariable=self.v["tur_ara"], width=30).grid(row=r, column=1, columnspan=2, sticky="we")
+        self.v["tur_ara"].trace_add("write", lambda *a: self._draw_turler())
+        r += 1
+        tlf = ttk.Frame(fp); tlf.grid(row=r, column=0, columnspan=3, sticky="we"); r += 1
+        self.lb_tur = tk.Listbox(tlf, selectmode="multiple", height=12, exportselection=False, width=44)
+        tsb = ttk.Scrollbar(tlf, orient="vertical", command=self.lb_tur.yview)
+        self.lb_tur.configure(yscrollcommand=tsb.set)
+        self.lb_tur.pack(side="left", fill="both", expand=True)
+        tsb.pack(side="right", fill="y")
+        self.lb_tur.bind("<<ListboxSelect>>", self._on_tur_select)
+        self.sel_turler: set = set()
+        self.tur_data: list = []
+        self.tur_visible: list = []
+        self.v["tur_secim_haric"] = tk.BooleanVar(value=False)
+        tf2 = ttk.Frame(fp); tf2.grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Radiobutton(tf2, text="Seçilenleri getir", variable=self.v["tur_secim_haric"], value=False, command=self.schedule_filter).pack(side="left")
+        ttk.Radiobutton(tf2, text="Seçilenleri hariç tut", variable=self.v["tur_secim_haric"], value=True, command=self.schedule_filter).pack(side="left")
+        tf3 = ttk.Frame(fp); tf3.grid(row=r, column=0, columnspan=3, sticky="we"); r += 1
+        self.lbl_tur_sel = ttk.Label(tf3, text="Seçili tür yok", foreground="#555")
+        self.lbl_tur_sel.pack(side="left")
+        ttk.Button(tf3, text="Seçimi temizle", command=self._clear_turler).pack(side="right")
+        ttk.Label(fp, text="Ekler, ait oldukları asıl evrakın türüyle süzülür.", foreground="#777").grid(
+            row=r, column=0, columnspan=3, sticky="w"); r += 1
 
         sec("Dosya biçimi / asıl-ek")
         self.lb_uz = tk.Listbox(fp, selectmode="multiple", height=5, exportselection=False, width=40)
@@ -334,6 +361,8 @@ class KatalogApp:
         f["kategoriler"] = [self.kat_codes[i] for i in self.lb_kat.curselection()]
         f["kategori_haric"] = self.v["kategori_haric"].get()
         f["kategori_ust"] = self.v["kategori_ust"].get()
+        f["turler"] = sorted(self.sel_turler)
+        f["tur_secim_haric"] = self.v["tur_secim_haric"].get()
         f["uzantilar"] = [self.lb_uz.get(i).split(" ")[0] for i in self.lb_uz.curselection()]
         f["ek"] = self.v["ek"].get()
         f["durum"] = self.durum_map.get(self.v["durum"].get(), "hepsi")
@@ -358,7 +387,8 @@ class KatalogApp:
                 n = self.kat.count(f)
                 rows = self.kat.query(f, limit=ROW_LIMIT)
                 cats = self.kat.category_counts(f)
-                self.ui_q.put(("results", tok, n, rows, cats))
+                turs = [(t or "(türsüz)", c) for t, c in self.kat.tur_counts(f)]
+                self.ui_q.put(("results", tok, n, rows, cats, turs))
             except Exception as e:
                 self.ui_q.put(("results_err", tok, str(e)))
         threading.Thread(target=run, daemon=True).start()
@@ -381,6 +411,38 @@ class KatalogApp:
             self.lb_kat.insert("end", f"{ek.KATEGORI_ADI[code]}  ({cats.get(code, 0):,})".replace(",", "."))
         for i in sel:
             self.lb_kat.selection_set(i)
+
+    def _draw_turler(self):
+        q = ek.fold(self.v["tur_ara"].get())
+        top = self.lb_tur.yview()[0] if self.tur_visible else 0
+        self.lb_tur.delete(0, "end")
+        self.tur_visible = []
+        for t, c in self.tur_data:
+            if q and q not in ek.fold(t):
+                continue
+            self.tur_visible.append(t)
+            self.lb_tur.insert("end", f"{t}  ({c:,})".replace(",", "."))
+            if t in self.sel_turler:
+                self.lb_tur.selection_set("end")
+        self.lb_tur.yview_moveto(top)
+        n = len(self.sel_turler)
+        self.lbl_tur_sel.config(text=f"{n} tür seçili" if n else "Seçili tür yok")
+
+    def _on_tur_select(self, _e=None):
+        cur = set(self.lb_tur.curselection())
+        for i, t in enumerate(self.tur_visible):
+            if i in cur:
+                self.sel_turler.add(t)
+            else:
+                self.sel_turler.discard(t)
+        n = len(self.sel_turler)
+        self.lbl_tur_sel.config(text=f"{n} tür seçili" if n else "Seçili tür yok")
+        self.schedule_filter(300)
+
+    def _clear_turler(self):
+        self.sel_turler.clear()
+        self._draw_turler()
+        self.schedule_filter(0)
 
     def refresh_facets(self):
         def run():
@@ -422,6 +484,7 @@ class KatalogApp:
                 var.set("")
         self.lb_kat.selection_clear(0, "end")
         self.lb_uz.selection_clear(0, "end")
+        self.sel_turler.clear()
         self.schedule_filter(0)
 
     # ------------------------------------------------------------------ olaylar
@@ -447,6 +510,11 @@ class KatalogApp:
                     self.lbl_prog.config(text=f"{done}/{total}  {text}")
                 elif kind == "results" and m[1] == self._query_token:
                     self._show_results(m[2], m[3], m[4])
+                    self.tur_data = m[5]
+                    for t in self.sel_turler:  # seçili ama filtrede sayısı 0 olanlar listede kalsın
+                        if not any(t == x for x, _ in self.tur_data):
+                            self.tur_data.append((t, 0))
+                    self._draw_turler()
                 elif kind == "results_err" and m[1] == self._query_token:
                     self.lbl_count.config(text=f"Sorgu hatası: {m[2]}")
                 elif kind == "facets":
