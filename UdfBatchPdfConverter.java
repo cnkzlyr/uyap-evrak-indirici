@@ -18,7 +18,7 @@ public class UdfBatchPdfConverter {
     private static final PrintStream CONSOLE = System.out;
 
     public static void main(String[] args) throws Exception {
-        String targetPathStr = "/sdcard/Download/UYAP_Indirilenler";
+        String targetPathStr = null;
         boolean forceOverwrite = false;
 
         for (String arg : args) {
@@ -26,6 +26,18 @@ public class UdfBatchPdfConverter {
                 forceOverwrite = true;
             } else if (!arg.startsWith("-")) {
                 targetPathStr = arg;
+            }
+        }
+
+        if (targetPathStr == null) {
+            if (new File("/sdcard/Download/UYAP_Indirilenler").exists()) {
+                targetPathStr = "/sdcard/Download/UYAP_Indirilenler";
+            } else if (new File("../UYAP_Indirilenler").exists()) {
+                targetPathStr = "../UYAP_Indirilenler";
+            } else if (new File("UYAP_Indirilenler").exists()) {
+                targetPathStr = "UYAP_Indirilenler";
+            } else {
+                targetPathStr = ".";
             }
         }
 
@@ -98,10 +110,23 @@ public class UdfBatchPdfConverter {
             Class<?> cClass = Class.forName("tr.com.havelsan.uyap.system.editor.b.c");
             Method regDir = cClass.getMethod("a", String.class);
 
+            // Android & Linux Font Dizinleri
             regDir.invoke(cObj, "/data/data/com.termux/files/home/.fonts/microsoft");
             regDir.invoke(cObj, "/data/data/com.termux/files/home/.fonts");
             regDir.invoke(cObj, "/system/fonts");
             regDir.invoke(cObj, "/data/data/com.termux/files/usr/share/fonts");
+
+            // Windows Font Dizinleri (Times New Roman, Arial, Calibri, vs.)
+            String winDir = System.getenv("WINDIR");
+            if (winDir != null && !winDir.trim().isEmpty()) {
+                regDir.invoke(cObj, winDir + "\\Fonts");
+            } else {
+                regDir.invoke(cObj, "C:\\Windows\\Fonts");
+            }
+            String userProfile = System.getenv("USERPROFILE");
+            if (userProfile != null && !userProfile.trim().isEmpty()) {
+                regDir.invoke(cObj, userProfile + "\\AppData\\Local\\Microsoft\\Windows\\Fonts");
+            }
 
             Method getA = cClass.getMethod("a");
             java.util.HashMap map = (java.util.HashMap) getA.invoke(cObj);

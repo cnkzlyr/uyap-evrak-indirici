@@ -65,6 +65,10 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent
 if Path("/sdcard/Download").exists():
     DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
+elif (BASE_DIR.parent / "UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = (BASE_DIR.parent / "UYAP_Indirilenler").resolve()
+elif (BASE_DIR / "UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = (BASE_DIR / "UYAP_Indirilenler").resolve()
 else:
     DEFAULT_DOWNLOAD_DIR = BASE_DIR / "UYAP_Indirilenler"
 CHROME_PROFILE_DIR = BASE_DIR / ".uyap_chrome_profile"

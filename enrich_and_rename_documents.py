@@ -30,8 +30,20 @@ import datetime as dt
 from pathlib import Path
 from collections import defaultdict
 
-DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
-DEFAULT_HISTORY_FILE = Path("/data/data/com.termux/files/home/uyap-evrak-indirici/indirme_gecmisi.json")
+BASE_DIR = Path(__file__).resolve().parent
+if Path("/sdcard/Download/UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
+elif (BASE_DIR.parent / "UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = (BASE_DIR.parent / "UYAP_Indirilenler").resolve()
+elif (BASE_DIR / "UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = (BASE_DIR / "UYAP_Indirilenler").resolve()
+else:
+    DEFAULT_DOWNLOAD_DIR = BASE_DIR / "UYAP_Indirilenler"
+
+if (BASE_DIR / "indirme_gecmisi.json").exists():
+    DEFAULT_HISTORY_FILE = (BASE_DIR / "indirme_gecmisi.json").resolve()
+else:
+    DEFAULT_HISTORY_FILE = BASE_DIR / "indirme_gecmisi.json"
 
 ROLE_REGEX = (
     r'(?:DAVALI\s*-\s*KARŞI\s*DAVACI|DAVACI\s*-\s*KARŞI\s*DAVALI|'

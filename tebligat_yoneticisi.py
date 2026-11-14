@@ -24,7 +24,15 @@ import zipfile
 import datetime as dt
 from pathlib import Path
 
-DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
+BASE_DIR = Path(__file__).resolve().parent
+if Path("/sdcard/Download/UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
+elif (BASE_DIR.parent / "UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = (BASE_DIR.parent / "UYAP_Indirilenler").resolve()
+elif (BASE_DIR / "UYAP_Indirilenler").exists():
+    DEFAULT_DOWNLOAD_DIR = (BASE_DIR / "UYAP_Indirilenler").resolve()
+else:
+    DEFAULT_DOWNLOAD_DIR = BASE_DIR / "UYAP_Indirilenler"
 PRIMARY_CSV_PATH = DEFAULT_DOWNLOAD_DIR / "TEBLIGATLAR" / "tebligat_takip_listesi.csv"
 BACKUP_CSV_PATH = Path(__file__).resolve().parent / "tebligat_takip_listesi.csv"
 
