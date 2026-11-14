@@ -44,19 +44,23 @@ case "$secim" in
         echo "  2) Bilirkişi Raporları (Kök + Ek Rapor, Uzman Görüşü, Adli Tıp / Kriminal)"
         echo "  3) Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)"
         echo "  4) Tensip Zabıtları (İlk + Talimat Tensip Zaptı)"
-        echo "  5) Dilekçeler ve Beyanlar (Dava, Cevap, İtiraz, İstinaf, Temyiz, Beyan, Mazeret)"
-        echo "  6) İddianame ve Fezleke (Ceza Soruşturma / Kovuşturma)"
-        echo "  7) Kesinleşme Şerhleri"
-        echo "  8) Özel Evrak Türü / Serbest Kelime Arama"
-        read -p "Seçiminiz (1-8) [Varsayılan: 1]: " ev_sec
+        echo "  5) Dava & Cevap Layihaları (Tüm Taraflar: Dava, Cevap, Replik, Düplik, Delil, İtiraz, Savunma)"
+        echo "  6) Tebligat Evrakları ve Tebliğ Mazbataları (Fiziki PTT Barkodlu Mazbatalar & Tebliğ Sonuçları)"
+        echo "  7) Müzekkere ve Kurum Cevapları (Banka, Tapu, SGK, EGM, HTS, Nüfus vb.)"
+        echo "  8) İddianame ve Fezleke (Ceza Soruşturma / Kovuşturma)"
+        echo "  9) Kesinleşme Şerhleri"
+        echo " 10) Özel Evrak Türü / Serbest Kelime Arama"
+        read -p "Seçiminiz (1-10) [Varsayılan: 1]: " ev_sec
         case "$ev_sec" in
             2) tur="bilirkisi" ;;
             3) tur="karar" ;;
             4) tur="tensip" ;;
-            5) tur="dilekce" ;;
-            6) tur="iddianame" ;;
-            7) tur="kesinlesme" ;;
-            8)
+            5) tur="layihalar" ;;
+            6) tur="tebligat" ;;
+            7) tur="muzekkere" ;;
+            8) tur="iddianame" ;;
+            9) tur="kesinlesme" ;;
+            10)
                 read -p "Aramak istediğiniz evrak türü / kelime: " custom_tur
                 tur="${custom_tur:-durusma}"
                 ;;

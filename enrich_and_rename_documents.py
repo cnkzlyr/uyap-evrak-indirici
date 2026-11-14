@@ -129,6 +129,9 @@ def extract_meta_from_udf(udf_path: Path) -> dict:
         "hakim": "",
         "katip": "",
         "dogrulama_kodu": "",
+        "muhatap": "",
+        "ptt_barkod": "",
+        "teblig_sonuc": "",
     }
     
     if not zipfile.is_zipfile(udf_path):
@@ -238,6 +241,32 @@ def extract_meta_from_udf(udf_path: Path) -> dict:
                             data["karsi_taraf"] = clean_n
                             break
 
+                # 9. Tebligat / Mazbata Bilgileri (Barkod, Muhatap, Sonuç)
+                m_ptt = re.search(r'\b([A-Z]{2}[0-9]{9}[A-Z]{2}|KP[0-9]{11}|[0-9]{13})\b', xml_text)
+                if m_ptt:
+                    data["ptt_barkod"] = m_ptt.group(1).strip()
+
+                m_muh = re.search(r'(?:Muhatap|Kime|Tebliğ\s*Edilen|Tebliğ\s*Çıkarılan|Sayın)\s*[:\-]?\s*([A-ZÇĞİÖŞÜa-zçğıöşü\s]{3,40}?)(?:\n|\r|\t|TC|T\.C|\-|,)', xml_text, re.IGNORECASE)
+                if m_muh:
+                    data["muhatap"] = clean_party_name(m_muh.group(1))
+
+                # Tebliğ Durumu / Sonucu Tespiti
+                t_lower = tr_lower(xml_text)
+                if any(k in t_lower for k in ("21/2", "21. madde", "mernis 21")):
+                    data["teblig_sonuc"] = "Teblig-Mernis-21-2"
+                elif any(k in t_lower for k in ("muhtara teslim", "mahalle muhtar")):
+                    data["teblig_sonuc"] = "Teblig-Muhtar"
+                elif any(k in t_lower for k in ("bizzat tebliğ", "kendisine tebliğ", "bizzat teslim")):
+                    data["teblig_sonuc"] = "Teblig-Bizzat"
+                elif any(k in t_lower for k in ("vekiline tebliğ", "vekiline teslim", "avukatına tebliğ")):
+                    data["teblig_sonuc"] = "Teblig-Vekile"
+                elif any(k in t_lower for k in ("bila tebliğ", "iade", "adreste tanınmıyor", "taşınmış", "adres yetersiz", "teslim edilemedi")):
+                    data["teblig_sonuc"] = "Iade-Edildi"
+                elif "tebliğ edildi" in t_lower or "teblig edildi" in t_lower or "teslim edildi" in t_lower:
+                    data["teblig_sonuc"] = "Teblig-Edildi"
+                elif "dağıtımda" in t_lower or "sevk edildi" in t_lower:
+                    data["teblig_sonuc"] = "Dagitimda"
+
     except Exception:
         pass
 
@@ -266,6 +295,9 @@ def update_udf_properties(udf_path: Path, meta: dict) -> bool:
             ("muvekkil", meta.get("muvekkil")),
             ("muvekkil_rol", meta.get("muvekkil_rol")),
             ("karsi_taraf", meta.get("karsi_taraf")),
+            ("muhatap", meta.get("muhatap")),
+            ("ptt_barkod", meta.get("ptt_barkod")),
+            ("teblig_sonuc", meta.get("teblig_sonuc")),
             ("avukat", "Av. CAN KIZILYAR"),
             ("evrak_turu", meta.get("evrak_turu")),
             ("evrak_tarihi", meta.get("evrak_tarihi")),
@@ -315,6 +347,9 @@ def build_enriched_filename(
     durusma_tarihi: str = "",
     celse_no: str = "",
     baglantili_dosya: str = "",
+    muhatap: str = "",
+    ptt_barkod: str = "",
+    teblig_sonuc: str = "",
     evrak_id: str = "",
     ext: str = ".udf"
 ) -> str:
@@ -341,7 +376,7 @@ def build_enriched_filename(
     et_clean = sanitize_name_component(evrak_turu, 30)
     parts.append(et_clean)
 
-    # 6. Ek Detaylar (Karar No, Bağlantılı Dosya, Celse, DT)
+    # 6. Ek Detaylar (Karar No, Bağlantılı Dosya, Celse, DT, Muhatap, PTT, Sonuç)
     extras = []
     if karar_no:
         k_clean = sanitize_name_component(karar_no.replace('/', '-'), 15)
@@ -356,6 +391,12 @@ def build_enriched_filename(
         t_ymd = '.'.join(t_clean.split('-')[::-1]) if '-' in t_clean else t_clean
         if dt_clean != t_dots and dt_clean != t_ymd and dt_clean != t_clean:
             extras.append(f"DT{dt_clean}")
+    if muhatap:
+        extras.append(f"Muhatap-{sanitize_name_component(muhatap, 25)}")
+    if ptt_barkod:
+        extras.append(f"PTT-{sanitize_name_component(ptt_barkod, 15)}")
+    if teblig_sonuc:
+        extras.append(sanitize_name_component(teblig_sonuc, 25))
 
     if extras:
         parts.append("_".join(extras))

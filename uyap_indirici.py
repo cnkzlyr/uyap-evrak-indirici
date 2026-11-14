@@ -168,6 +168,23 @@ def tr_lower(text: str) -> str:
     )
 
 
+def tr_upper(text: str) -> str:
+    """Türkçe i/İ, ı/I, ş/Ş, ğ/Ğ, ü/Ü, ö/Ö, ç/Ç harflerini Unicode standardında büyük harfe dönüştürür."""
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace("i", "İ")
+        .replace("ı", "I")
+        .replace("ş", "Ş")
+        .replace("ğ", "Ğ")
+        .replace("ü", "Ü")
+        .replace("ö", "Ö")
+        .replace("ç", "Ç")
+        .upper()
+    )
+
+
 def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
     """
     UYAP'taki tarihsel ve mahkeme bazlı evrak adı çeşitliliklerini dikkate alarak
@@ -227,12 +244,48 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
     if ft == "tensip":
         return "tensip" in tn and not ("itiraz" in tn)
 
-    if ft == "dilekce":
-        is_dil = any(k in tn for k in (
-            "dilekçe", "dilekce", "beyan", "savunma", "vekaletname", "yetki belgesi",
-            "mazeret", "mütalaa", "mutalaa"
+    if ft in ("layihalar", "dilekce", "dilekceler"):
+        # Hem bizim hem karşı tarafın sunduğu tüm dava ve cevap layihaları, beyanlar, itirazlar
+        is_layiha = any(k in tn for k in (
+            "dilekçe", "dilekce", "layiha", "replik", "düplik", "duplik",
+            "dava açılış", "dava acilis", "açılan dava", "acilan dava",
+            "delil", "beyan", "savunma", "mütalaa", "mutalaa", "talep evrak",
+            "şikayet", "sikayet", "katılan", "katilan", "itiraz dilekç", "itiraz dilekc",
+            "itiraz", "ıslah", "islah", "feragat", "kabul dilekç", "kabul dilekc", "sulh dilekç",
+            "ihtiyati tedbir", "tehir-i icra", "adli yardım", "adli yardim",
+            "süre tutum", "sure tutum", "vekaletname", "yetki belgesi",
+            "e-dilekçe", "e-dilekce", "avukat evrak"
         ))
-        return is_dil and not any(k in tn for k in ("tebliğ", "teblig", "mazbata"))
+        is_ex = any(k in tn for k in (
+            "tebligat", "tebliğ", "teblig", "mazbata", "duruşma tutana", "durusma tutana",
+            "celse zapt", "tensip zapt", "gerekçeli karar", "gerekceli karar",
+            "kısa karar", "kisa karar", "makbuz", "tahsilat", "harç makbuz", "harc makbuz",
+            "masraf makbuz", "keşif zapt"
+        )) and not any(k in tn for k in ("dilekçe", "dilekce", "itiraz", "beyan", "savunma", "layiha"))
+        return is_layiha and not is_ex
+
+    if ft in ("tebligat", "tebligatlar", "mazbata"):
+        # Fiziki Tebligat ve Mazbatalar (e-Tebligat / UETS hariç)
+        is_teb = any(k in tn for k in (
+            "tebligat mazbata", "tebliğ mazbata", "teblig mazbata",
+            "tebligat parça", "tebligat parca", "tebliğ şerhi", "teblig serhi",
+            "tebligat dönüş", "tebligat donus", "ptt dağıtım", "ptt dagitim",
+            "tebliğ evrak", "teblig evrak", "tebligat evrak", "normal tebligat",
+            "yurt dışı tebligat", "mernis tebligat", "21/2 tebligat", "ilanen tebligat",
+            "posta alındı", "posta alindi", "teslim tutanağı", "teslim tutanagi"
+        )) or (("tebligat" in tn or "tebliğ" in tn) and not any(k in tn for k in ("duruşma", "durusma", "karar", "dilekçe", "dilekce", "tensip")))
+        
+        is_elektronik = any(k in tn for k in ("e-tebligat", "elektronik tebligat", "uets"))
+        return is_teb and not is_elektronik
+
+    if ft in ("muzekkere", "muzekkereler", "kurum_cevaplari"):
+        is_muz = any(k in tn for k in (
+            "müzekkere", "muzekkere", "kurum cevap", "banka", "ekstre",
+            "tapu", "sgk", "egm", "polnet", "takbis",
+            "nüfus", "nufus", "hts", "abone bilgisi", "kayıt cevap", "kayit cevap"
+        )) and any(k in tn for k in ("cevab", "cevap", "yazı", "yazi", "müzekkere", "muzekkere", "ekstre", "rapor", "belge", "döküm", "dokum"))
+        is_ex = any(k in tn for k in ("duruşma", "durusma", "karar", "dilekçe", "dilekce", "tensip"))
+        return is_muz and not is_ex
 
     if ft == "iddianame":
         return any(k in tn for k in ("iddianame", "fezleke")) and not ("iade" in tn)
@@ -272,9 +325,7 @@ def auto_convert_udf_to_pdf(target_path: Path):
 
 def infer_dosya_turu(birim_adi: str, explicit_tur: str = "") -> str:
     """Birim adından veya açık dosya türünden anlamlı bir Dosya/Yargı Türü kategorisi çıkarır."""
-    if explicit_tur and explicit_tur.strip():
-        return sanitize_path_part(explicit_tur.strip(), "Diger_Dosya")
-    b = (birim_adi or "").upper()
+    b = tr_upper(birim_adi or "")
     mapping = [
         ("AĞIR CEZA", "Agir_Ceza_Mahkemesi"),
         ("AGIR CEZA", "Agir_Ceza_Mahkemesi"),
@@ -282,36 +333,54 @@ def infer_dosya_turu(birim_adi: str, explicit_tur: str = "") -> str:
         ("ASLIYE CEZA", "Asliye_Ceza_Mahkemesi"),
         ("SULH CEZA", "Sulh_Ceza_Hakimligi"),
         ("ÇOCUK", "Cocuk_Mahkemesi"),
-        ("İNFaz", "Infaz_Hakimligi"),
         ("İNFAZ", "Infaz_Hakimligi"),
         ("İCRA CEZA", "Icra_Ceza_Mahkemesi"),
         ("İCRA HUKUK", "Icra_Hukuk_Mahkemesi"),
         ("İCRA DAİRESİ", "Icra_Dairesi"),
         ("İCRA MÜDÜRLÜĞÜ", "Icra_Dairesi"),
-        ("İCRA", "Icra_Dairesi"),
+        ("GENEL İCRA", "Icra_Dairesi"),
+        ("İFLAS", "Icra_Dairesi"),
+        ("SATIŞ MEMURLUĞU", "Satis_Memurlugu"),
         ("ASLİYE HUKUK", "Asliye_Hukuk_Mahkemesi"),
         ("SULH HUKUK", "Sulh_Hukuk_Mahkemesi"),
         ("ASLİYE TİCARET", "Asliye_Ticaret_Mahkemesi"),
         ("AİLE MAHKEMESİ", "Aile_Mahkemesi"),
+        ("AİLE", "Aile_Mahkemesi"),
         ("İŞ MAHKEMESİ", "Is_Mahkemesi"),
         ("TÜKETİCİ", "Tuketici_Mahkemesi"),
         ("KADASTRO", "Kadastro_Mahkemesi"),
         ("FİKRİ VE SINAİ", "Fikri_Sinai_Haklar_Mahkemesi"),
-        ("BÖLGE ADLİYE", "Bolge_Adliye_Mahkemesi_Istinaf"),
         ("BÖLGE İDARE", "Bolge_Idare_Mahkemesi"),
+        ("İDARİ DAVA DAİRESİ", "Bolge_Idare_Mahkemesi"),
+        ("VERGİ DAVA DAİRESİ", "Bolge_Idare_Mahkemesi"),
+        ("BİM ", "Bolge_Idare_Mahkemesi"),
         ("İDARE MAHKEMESİ", "Idare_Mahkemesi"),
         ("VERGİ MAHKEMESİ", "Vergi_Mahkemesi"),
+        ("BÖLGE ADLİYE", "Bolge_Adliye_Mahkemesi_Istinaf"),
+        ("BAM ", "Bolge_Adliye_Mahkemesi_Istinaf"),
         ("YARGITAY", "Yargitay"),
         ("DANIŞTAY", "Danistay"),
         ("ANAYASA MAHKEMESİ", "Anayasa_Mahkemesi"),
         ("BAŞSAVCILIĞI", "Cumhuriyet_Bassavciligi_Sorusturma"),
         ("SAVCILIĞI", "Cumhuriyet_Bassavciligi_Sorusturma"),
+        ("SORUŞTURMA BÜROSU", "Cumhuriyet_Bassavciligi_Sorusturma"),
+        ("HAZIRLIK BÜROSU", "Cumhuriyet_Bassavciligi_Sorusturma"),
+        ("UZLAŞTIRMA", "Uzlastirma_Burosu"),
         ("ARABULUCULUK", "Arabuluculuk_Burosu"),
-        ("SATIŞ MEMURLUĞU", "Satis_Memurlugu"),
+        ("TEVZİ BÜRO", "Tevzi_Burosu"),
+        ("ÖN BÜRO", "On_Buro"),
+        ("VEZNE", "On_Buro"),
     ]
     for kw, label in mapping:
         if kw in b:
             return label
+
+    # Birim adından çıkarılamadıysa explicit_tur'e bak (genel 'Diğer Yargı Birimi' değilse)
+    if explicit_tur and explicit_tur.strip():
+        sanitized = sanitize_path_part(explicit_tur.strip(), "Diger_Dosya")
+        if sanitized not in ("Diger_Yargi_Birimi", "Diğer_Yargı_Birimi", "Diger_Dosya", "Belirtilmemis_Birim"):
+            return sanitized
+
     if birim_adi and birim_adi.strip():
         return "Diger_Yargi_Birimi"
     return "Belirtilmemis_Birim"
@@ -328,7 +397,7 @@ def is_case_relevant_for_filter(birim_adi: str, evrak_filter: str) -> bool:
     b = tr_lower(birim_adi)
     f = tr_lower(evrak_filter)
 
-    if f in ("tumu", "all", "*"):
+    if f in ("tumu", "all", "*", "layihalar", "dilekce", "dilekceler", "tebligat", "tebligatlar", "mazbata"):
         return True
 
     # İcra Dairesi / Müdürlüğü (Duruşma ve Tensip Mahkeme kararıdır, İcra Dairesinde OLMAZ)
@@ -373,13 +442,13 @@ def infer_yargi_kategorisi(birim_adi: str) -> str:
     b = tr_lower(birim_adi)
     if any(k in b for k in ("icra ceza", "icra hukuk")):
         return "Icra_Mahkemeleri"
-    if any(k in b for k in ("icra dairesi", "icra müdürlüğü", "icra mudurlugu", "genel icra", "iflas")):
+    if any(k in b for k in ("icra dairesi", "icra müdürlüğü", "icra mudurlugu", "genel icra", "iflas", "satış memurluğu", "satis memurlugu")):
         return "Icra_Daireleri"
-    if any(k in b for k in ("idare", "vergi", "danıştay", "danistay")):
+    if any(k in b for k in ("idare", "idari", "vergi", "danıştay", "danistay", "bim", "bölge idare", "bolge idare")):
         return "Idari_Yargi"
-    if any(k in b for k in ("ceza", "savcı", "savci", "başsavcı", "bassavci", "çocuk", "cocuk", "infaz")):
+    if any(k in b for k in ("ceza", "savcı", "savci", "başsavcı", "bassavci", "çocuk", "cocuk", "infaz", "hazırlık", "hazirlik", "soruşturma", "sorusturma")):
         return "Ceza_Yargisi"
-    if any(k in b for k in ("hukuk", "asliye", "sulh", "aile", "iş", "is mah", "ticaret", "tüketici", "tuketici", "kadastro", "fikri", "yargıtay", "yargitay")):
+    if any(k in b for k in ("hukuk", "asliye", "sulh", "aile", "iş", "is mah", "ticaret", "tüketici", "tuketici", "kadastro", "fikri", "yargıtay", "yargitay", "bam", "bölge adliye", "bolge adliye", "arabuluculuk", "uzlaştırma", "uzlastirma", "tevzi", "ön büro", "on buro")):
         return "Hukuk_Yargisi"
     return "Diger_Yargi"
 
@@ -395,12 +464,17 @@ def infer_evrak_alt_kategori(evrak_turu: str) -> str:
         return "GEREKCELI_KARARLAR"
     if "tensip" in t:
         return "TENSIP_ZAPITLARI"
-    if any(k in t for k in ("dilekçe", "dilekce", "beyan", "savunma", "vekalet")):
-        return "DILEKCELER_BEYANLAR"
+    if any(k in t for k in ("dilekçe", "dilekce", "beyan", "savunma", "layiha", "vekalet", "talep")):
+        return "DILEKCELER_LAYIHALAR"
+    if any(k in t for k in ("tebligat", "tebliğ", "teblig", "mazbata")):
+        return "TEBLIGATLAR"
+    if any(k in t for k in ("müzekkere", "muzekkere", "kurum cevab", "banka cevab")):
+        return "MUZEKKERE_VE_KURUM_CEVAPLARI"
     if any(k in t for k in ("iddianame", "fezleke")):
         return "IDDIANAMELER"
     if "kesinleşme" in t or "kesinlesme" in t:
         return "KESINLESME_SERHLERI"
+    return "DAVA_EVRAKLARI"
     return "DAVA_EVRAKLARI"
 
 
@@ -2828,14 +2902,16 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         print("  2) Bilirkişi Raporları (Kök + Ek Rapor, Uzman Görüşü, Adli Tıp / Kriminal)")
         print("  3) Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)")
         print("  4) Tensip Zabıtları (İlk Tensip, Talimat Tensip Zaptı)")
-        print("  5) Dilekçeler ve Beyanlar (Dava, Cevap, İtiraz, İstinaf, Temyiz, Beyan, Mazeret)")
-        print("  6) İddianame ve Ceza Başvuru Evrakları (İddianame, Fezleke, İddianame Kabul)")
-        print("  7) Kesinleşme Şerhleri")
-        print("  8) TÜM Evraklar ve Ekleri (Toplu Eksiksiz Arşiv)")
-        print("  9) Özel Kelime Arama (Serbest Metin)")
+        print("  5) Dava & Cevap Layihaları (Tüm Taraflar: Dava, Cevap, Replik, Düplik, Delil, İtiraz, Savunma)")
+        print("  6) Tebligat Evrakları ve Tebliğ Mazbataları (Fiziki PTT Mazbatalar & Barkodlu Tebliğ Sonuçları)")
+        print("  7) Müzekkere ve Kurum Cevapları (Banka, Tapu, SGK, EGM, HTS, Nüfus vb.)")
+        print("  8) İddianame ve Ceza Başvuru Evrakları (İddianame, Fezleke, İddianame Kabul)")
+        print("  9) Kesinleşme Şerhleri")
+        print(" 10) TÜM Evraklar ve Ekleri (Toplu Eksiksiz Arşiv)")
+        print(" 11) Özel Kelime Arama (Serbest Metin)")
         print("-" * 65)
         try:
-            sec = input("Seçiminiz (1-9) [Varsayılan: 1]: ").strip() or "1"
+            sec = input("Seçiminiz (1-11) [Varsayılan: 1]: ").strip() or "1"
         except (EOFError, KeyboardInterrupt):
             sec = "1"
 
@@ -2848,15 +2924,19 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         elif sec == "4":
             evrak_filter = "tensip"
         elif sec == "5":
-            evrak_filter = "dilekce"
+            evrak_filter = "layihalar"
         elif sec == "6":
-            evrak_filter = "iddianame"
+            evrak_filter = "tebligat"
         elif sec == "7":
-            evrak_filter = "kesinlesme"
+            evrak_filter = "muzekkere"
         elif sec == "8":
+            evrak_filter = "iddianame"
+        elif sec == "9":
+            evrak_filter = "kesinlesme"
+        elif sec == "10":
             evrak_filter = "tumu"
             include_attachments = True
-        elif sec == "9":
+        elif sec == "11":
             try:
                 evrak_filter = input("Aramak istediğiniz evrak türü / kelime: ").strip().lower()
             except Exception:
@@ -2869,7 +2949,10 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         "bilirkisi": "Bilirkişi Raporları (Kök + Ek + Adli Tıp / Kriminal)",
         "karar": "Gerekçeli Karar, Hüküm ve İlamlar (BAM / Yargıtay)",
         "tensip": "Tensip Zabıtları (İlk + Talimat Tensip)",
+        "layihalar": "Dava & Cevap Layihaları ve Beyanlar (Tüm Taraflar)",
         "dilekce": "Dilekçeler ve Beyanlar (Dava, Cevap, İstinaf, Temyiz)",
+        "tebligat": "Tebligat Evrakları ve Tebliğ Mazbataları (Fiziki PTT)",
+        "muzekkere": "Müzekkere ve Kurum Cevapları (Banka, Tapu, SGK, EGM vb.)",
         "iddianame": "İddianame ve Fezleke",
         "kesinlesme": "Kesinleşme Şerhleri",
         "tumu": "Tüm Evraklar ve Ek Belgeler (Toplu Tam Arşiv)",
@@ -3111,9 +3194,13 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         "BILIRKISI_RAPORLARI" if evrak_filter == "bilirkisi" else (
             "GEREKCELI_KARARLAR" if evrak_filter == "karar" else (
                 "TENSIP_ZAPITLARI" if evrak_filter == "tensip" else (
-                    "DILEKCELER_BEYANLAR" if evrak_filter == "dilekce" else (
-                        "IDDIANAMELER" if evrak_filter == "iddianame" else (
-                            "KESINLESME_SERHLERI" if evrak_filter == "kesinlesme" else "DAVA_EVRAKLARI"
+                    "DILEKCELER_LAYIHALAR" if evrak_filter in ("layihalar", "dilekce", "dilekceler") else (
+                        "TEBLIGATLAR" if evrak_filter in ("tebligat", "tebligatlar", "mazbata") else (
+                            "MUZEKKERE_VE_KURUM_CEVAPLARI" if evrak_filter in ("muzekkere", "muzekkereler", "kurum_cevaplari") else (
+                                "IDDIANAMELER" if evrak_filter == "iddianame" else (
+                                    "KESINLESME_SERHLERI" if evrak_filter == "kesinlesme" else "DAVA_EVRAKLARI"
+                                )
+                            )
                         )
                     )
                 )
@@ -3235,6 +3322,9 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                     durusma_tarihi=meta.get("durusma_tarihi", ""),
                     celse_no=meta.get("celse_no", ""),
                     baglantili_dosya=meta.get("baglantili_dosya", ""),
+                    muhatap=meta.get("muhatap", ""),
+                    ptt_barkod=meta.get("ptt_barkod", ""),
+                    teblig_sonuc=meta.get("teblig_sonuc", ""),
                     evrak_id=doc_num,
                     ext=clean_ext
                 )
