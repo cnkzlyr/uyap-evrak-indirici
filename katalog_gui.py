@@ -125,6 +125,9 @@ class TriList(ttk.Frame):
         self.lb.bind("<B1-Motion>", lambda e: "break")
         bf = ttk.Frame(self)
         bf.pack(fill="x")
+        self.sort = "sayi"
+        self.btn_sort = ttk.Button(bf, text="Sırala: A→Z", width=12, command=self.toggle_sort)
+        self.btn_sort.pack(side="right", padx=(2, 0))
         self.lbl = ttk.Label(bf, text="", foreground="#555")
         self.lbl.pack(side="left")
         ttk.Button(bf, text="Temizle", width=8, command=self.clear).pack(side="right")
@@ -161,7 +164,10 @@ class TriList(ttk.Frame):
         self.lb.delete(0, "end")
         # Sıra sabit kalır (sayıya göre); tıklanan öğe yer değiştirmez, art arda tıklama aynı öğeye gider
         self.visible = []
-        for k, c in self.items:
+        items = self.items
+        if self.sort == "alfa":
+            items = sorted(items, key=lambda it: ek.fold(self.labeler(it[0])))
+        for k, c in items:
             label = self.labeler(k)
             if q and q not in ek.fold(label):
                 continue
@@ -175,6 +181,14 @@ class TriList(ttk.Frame):
         h = sum(1 for v in self.state.values() if v == -1)
         parts = ([f"{d} getir"] if d else []) + ([f"{h} hariç"] if h else [])
         self.lbl.config(text=", ".join(parts) if parts else "Seçim yok")
+
+    def toggle_sort(self):
+        self.set_sort("alfa" if self.sort == "sayi" else "sayi")
+
+    def set_sort(self, mode: str):
+        self.sort = mode if mode in ("sayi", "alfa") else "sayi"
+        self.btn_sort.config(text="Sırala: Sayı" if self.sort == "alfa" else "Sırala: A→Z")
+        self.redraw()
 
     def _click(self, e):
         i = self.lb.nearest(e.y)
@@ -220,6 +234,7 @@ class KatalogApp:
             self.tri["durum"].set_state({"yeni": 1}, notify=False)  # ilk açılış: indirilmemişler
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._startup_sync, daemon=True).start()
         self.root.after(100, self._drain)
         self.refresh_facets()
         self.apply_filters()
@@ -507,6 +522,7 @@ class KatalogApp:
                     "bool": {k: self.v[k].get() for k in ("sadece_muvekkilli", "kategori_ust", "ayni_ad_tek")},
                     "ek": self.v["ek"].get(),
                     "tri": {k: t.state for k, t in self.tri.items()},
+                    "sirala": {k: t.sort for k, t in self.tri.items()},
                     "ayar": {k: self.v[k].get() for k in ("min_d", "max_d", "dir")},
                     "gizli_tarayici": self.var_headless.get()}
             self.STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -525,6 +541,9 @@ class KatalogApp:
             if k in self.v:
                 self.v[k].set(bool(val))
         self.v["ek"].set(data.get("ek") or "hepsi")
+        for k, mode in (data.get("sirala") or {}).items():
+            if k in self.tri:
+                self.tri[k].set_sort(mode)
         for k, st in (data.get("tri") or {}).items():
             if k in self.tri:
                 self.tri[k].set_state({kk: int(vv) for kk, vv in st.items()}, notify=False)
@@ -599,6 +618,16 @@ class KatalogApp:
                 self.log(f"[x] {name} hatası: {e}")
             finally:
                 self.ui_q.put(("done",))
+
+    def _startup_sync(self):
+        """Açılışta: klasörden silinen/taşınan indirmeler 'İndirilmedi'ye döner."""
+        try:
+            n = self.kat.sync_disk()
+            if n:
+                self.log(f"[i] Diskte bulunamayan {n} evrak 'İndirilmedi' olarak işaretlendi (silinmiş/taşınmış).")
+                self.ui_q.put(("done",))
+        except Exception as e:
+            self.log(f"[!] Disk kontrolü yapılamadı: {e}")
 
     def _on_close(self):
         self._save_state()

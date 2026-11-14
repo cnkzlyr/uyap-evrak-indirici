@@ -320,6 +320,29 @@ class Katalog:
             )
         return len(rows)
 
+    def sync_disk(self) -> int:
+        """Diskte artık bulunmayan (silinmiş/taşınmış) indirmeleri 'İndirilmedi' durumuna döndürür.
+        Mükerrer kayıtlardan asıl kopyası silinenler de yeniden indirilebilir hale gelir."""
+        rows = self.db.execute(
+            "SELECT id, path FROM evrak WHERE durum IN ('indirildi','mukerrer') AND path IS NOT NULL").fetchall()
+        exists: dict = {}
+        gone = []
+        for r in rows:
+            pth = r["path"]
+            if pth not in exists:
+                exists[pth] = os.path.exists(pth)
+            if not exists[pth]:
+                gone.append(r["id"])
+        if gone:
+            with self.db:
+                for i in range(0, len(gone), 900):
+                    ch = gone[i:i + 900]
+                    ph = ",".join("?" * len(ch))
+                    self.db.execute(f"""UPDATE evrak SET durum='yeni', path=NULL, pdf_path=NULL, sha256=NULL,
+                                        dup_of=NULL, indirildi=NULL, hata=NULL WHERE id IN ({ph})""", ch)
+                    self.db.execute(f"DELETE FROM evrak_fts WHERE rowid IN ({ph})", ch)
+        return len(gone)
+
     def finalize_scan(self):
         """Tarama sonrası mükerrer işaretleri ve 'aynı adlı ilk ek' bayraklarını hesaplar."""
         with self.db:
@@ -1017,6 +1040,9 @@ class Motor:
         from uyap_indirici import is_valid_document_bytes, guess_extension
         import base64
         stats = {"indirildi": 0, "mukerrer": 0, "yok": 0, "hata": 0, "atlandi": 0}
+        n_gone = self.kat.sync_disk()
+        if n_gone:
+            self.log(f"[i] Diskte bulunamayan {n_gone} evrak yeniden indirilecek olarak işaretlendi.")
         if not ids:
             return stats
         if not self.oturum:
