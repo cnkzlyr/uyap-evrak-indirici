@@ -756,13 +756,19 @@ class KatalogApp:
             if ans is None:
                 return
             only = eksik if ans else None
-        elif not messagebox.askyesno("UYAP'ı tara", "Tüm açık ve kapalı dosyaların evrak listeleri kataloğa yazılacak "
-                                     "(indirme yapılmaz). 700+ dosyada birkaç dakika sürebilir. Başlasın mı?"):
-            return
+        include_closed = True
+        if only is None:
+            ans = messagebox.askyesnocancel(
+                "UYAP'ı tara",
+                "Evet: yalnızca AÇIK dosyaları güncelle (hızlı; kapalı dosyalara yeni evrak düşmez)\n"
+                "Hayır: açık + kapalı tüm dosyaları tara (yavaş)\nİptal: vazgeç\n\nİndirme yapılmaz.")
+            if ans is None:
+                return
+            include_closed = not ans
 
         def job():
             if self._ensure_session():
-                self.motor.scan(include_closed=True, only_dkeys=only)
+                self.motor.scan(include_closed=include_closed, only_dkeys=only)
         self._submit("Tarama", job)
 
     def _start_download(self, ids: list[int]):
