@@ -22,11 +22,12 @@ echo   8. Indirilen UDF'leri PDF'e Donustur [TrueType Embedded PDF]
 echo   9. Tebligat ve Sure Analizi Calistir [tebligat_takip_listesi.csv]
 echo  10. Evrak Zenginlestirme ve Akilli Isimlendirme [enrich_and_rename]
 echo  11. Chrome / Edge UYAP Oturumu Baslat [Port 9223]
+echo  12. EVRAK KATALOGU: Tara, Filtrele, Secip Bir Kez Indir [Pencere]
 echo   0. Cikis
 echo.
 echo ==================================================================
 set secim=
-set /p secim="Seciminiz 0-11 [Varsayilan: 1]: "
+set /p secim="Seciminiz 0-12 [Varsayilan: 1]: "
 if "%secim%"=="" set secim=1
 if "%secim%"=="0" goto cikis
 
@@ -41,6 +42,7 @@ if "%secim%"=="8" goto opt8
 if "%secim%"=="9" goto opt9
 if "%secim%"=="10" goto opt10
 if "%secim%"=="11" goto opt11
+if "%secim%"=="12" goto opt12
 goto opt1
 
 :opt1
@@ -205,6 +207,12 @@ echo.
 echo [*] Chrome / Edge UYAP Oturumu Baslatiliyor [Port 9223]...
 rem Script ile ayni profil ve port kullanilir (oturum ortak olur)
 python uyap_indirici.py --browser-only
+goto bitir
+
+:opt12
+echo.
+echo [*] Evrak Katalogu aciliyor...
+python uyap_indirici.py --katalog
 goto bitir
 
 :bitir

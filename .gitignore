@@ -25,3 +25,7 @@ env/
 venv/
 .idea/
 .vscode/
+
+# Evrak katalogu (yerel veritabani, kisisel veri)
+uyap_katalog.db*
+jars/

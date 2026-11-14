@@ -3655,12 +3655,12 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         save_ai_manifest(target_base, found_documents, download_queue)
         return
 
-    min_d = 1.2
-    max_d = 2.8
-    batch_n = 20
-    batch_pause = 10.0
+    min_d = 0.6
+    max_d = 1.2
+    batch_n = 30
+    batch_pause = 6.0
     downloaded_now = 0
-    max_retries = 3
+    max_retries = 5
 
     print(f"[*] Güvenli hızlı indirme başlatılıyor ({min_d}-{max_d} sn bekleme, her {batch_n} dosyada {batch_pause:.0f} sn mola)...")
 
@@ -4683,8 +4683,34 @@ def main():
 
     parser.add_argument("--dry-run", action="store_true", help="Tara ve mükerrer kontrolü yap, hiçbir şey indirme (dava dosyası modları)")
     parser.add_argument("--browser-only",action="store_true", help="Sadece UYAP tarayıcısını (CDP portu açık, ayrı profil) başlat ve çık")
+    parser.add_argument("--katalog", action="store_true", help="Evrak kataloğu arayüzü: tüm evrakları tara, filtrele, seçip bir kez indir")
+    parser.add_argument("--katalog-tara", action="store_true", help="Kataloğu terminalden güncelle (indirme yapmaz; sunucu/zamanlanmış görev için)")
 
     args = parser.parse_args()
+
+    if args.katalog:
+        import katalog_gui
+        katalog_gui.main()
+        return
+
+    if args.katalog_tara:
+        import evrak_katalog
+        try:
+            bridge, user = cli_ensure_session(args)
+            if not user:
+                sys.exit(1)
+            motor = evrak_katalog.Motor(bridge, evrak_katalog.Katalog(),
+                                        Path(args.dir) if args.dir else DEFAULT_DOWNLOAD_DIR,
+                                        progress=lambda d, t, s="": print(f"\r  {d}/{t} {s}".ljust(70), end="", flush=True))
+            motor.scan(include_closed=args.include_closed)
+            print()
+        except KeyboardInterrupt:
+            print("\n[*] Durduruldu.")
+            sys.exit(130)
+        except UyapBrowserError as e:
+            print(f"\n[x] {e}")
+            sys.exit(2)
+        sys.exit(0)
 
     if args.browser_only:
         b = UyapBrowserBridge(port=args.port)

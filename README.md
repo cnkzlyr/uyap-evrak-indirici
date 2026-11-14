@@ -48,6 +48,15 @@ Sistem **Windows 11 (Chrome / Edge)**, **Linux / macOS** ve **Android (Termux / 
    * Atomik dosya yazımı (`.part` doğrulaması) ile bozuk indirmeleri engeller.
    * ArkSigner (Port 5975) ve Mobil İmza desteği ile kesintisiz oturum yeniler.
 
+7. **Evrak Kataloğu: Tara → Filtrele → Seç → Bir Kez İndir** (`python uyap_indirici.py --katalog`, menü 12):
+   * Tüm açık/kapalı dosyaların evrak ve ek listesi indirmeden yerel bir veritabanına (`uyap_katalog.db`) yazılır; yüz binlerce kayıt saniyeler içinde süzülür.
+   * Filtreler: taraf, müvekkil (taraf/vekil bilgisinden otomatik), açıklama, evrak türü (dahil / hariç kelimeler), içerik (indirilenlerde tam metin), tarih aralığı (takvimden) veya son N gün, birim, dosya no, dosya türü, yargı, açık/kapalı, evrak kategorisi (dahil/hariç), uzantı (udf/tif/pdf/eyp…), asıl/ek, indirme durumu.
+   * **Her evrak bir kez:** kalıcı anahtar (birim evrak no + tarih + tür; ekler için UYAP ana evrak no + sıra) sayesinde istinaf/birleşen/talimat dosyalarında tekrar görünen evrak tek kayıttır. Başka evrakın ekinde tekrar gelen aynı belge içerik özetiyle (UDF'de `content.xml` + imza) yakalanır ve ikinci kez diske yazılmaz.
+   * UDF'ler aynı adla PDF'e, TIF/TIFF'ler (çok sayfalı) A4 PDF'e dönüştürülür.
+   * Ekler ait oldukları evrakın adıyla başlar: `2025-07-10_Talimat Üst Yazısı_[…]_no68987__EK03_İfade Tutanağı.tif`
+   * Tarayıcı arka planda (gizli) açılır; oturum yoksa e-İmza (PIN yalnızca bellekte) veya Mobil İmza ile girilir, oturum düşerse aynı yöntemle yenilenir.
+   * Sunucu/zamanlanmış görev için: `python uyap_indirici.py --katalog-tara --headless` (yalnız kataloğu günceller).
+
 ---
 
 ## 🖥️ Windows 11 Kurulumu ve Kullanımı
