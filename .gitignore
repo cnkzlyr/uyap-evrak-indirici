@@ -29,3 +29,4 @@ venv/
 # Evrak katalogu (yerel veritabani, kisisel veri)
 uyap_katalog.db*
 jars/
+.katalog_filtre.json

@@ -407,35 +407,95 @@ class Katalog:
         return {"evrak": r["n"] or 0, "ek": r["ek"] or 0, "indirildi": r["ind"] or 0,
                 "mukerrer": r["muk"] or 0, "yeni": r["yeni"] or 0, "dosya": d}
 
+    # Üç durumlu liste filtreleri: {"sec": {anahtar: {"dahil": [...], "haric": [...]}}}
+    FASETLER = {
+        "kategori": "e.kategori", "tur": "e.ust_tur", "uzanti": "e.uzanti", "durum": "e.durum",
+        "birim": "d.birim", "dosya_tur": "d.dosya_tur", "yargi": "d.yargi", "dosya_durum": "d.durum",
+    }
+
+    def _faset_col(self, key: str, f: dict) -> str:
+        if key == "kategori" and f.get("kategori_ust"):
+            return "e.ust_kategori"
+        return self.FASETLER[key]
+
+    @staticmethod
+    def split_terms(text) -> tuple[list, list]:
+        """'ahmet -mehmet "ağır ceza"' -> (['ahmet', 'agir ceza'], ['mehmet']). Başında '-' olan hariç tutulur."""
+        pos, neg = [], []
+        for m in re.finditer(r'(-?)"([^"]+)"|(-?)([^\s"]+)', str(text or "")):
+            minus = (m.group(1) or m.group(3) or "") == "-"
+            term = fold(m.group(2) or m.group(4) or "")
+            if term and term != "-":
+                (neg if minus else pos).append(term)
+        return pos, neg
+
     def build_where(self, f: dict) -> tuple[str, list]:
-        """Filtre sözlüğünden SQL WHERE üretir. Tüm metin aramaları Türkçe-duyarsızdır."""
+        """Filtre sözlüğünden SQL WHERE üretir. Metin aramaları Türkçe-duyarsızdır; '-kelime' hariç tutar."""
         w, p = [], []
 
-        def like_all(col_expr: str, text: str):
-            for tok in fold(text).split():
-                w.append(f"{col_expr} LIKE ?")
-                p.append(f"%{tok}%")
+        def text_filter(cols: list, text: str):
+            pos, neg = self.split_terms(text)
+            for tok in pos:
+                w.append("(" + " OR ".join(f"{c} LIKE ?" for c in cols) + ")")
+                p.extend([f"%{tok}%"] * len(cols))
+            for tok in neg:
+                w.append("NOT (" + " OR ".join(f"COALESCE({c},'') LIKE ?" for c in cols) + ")")
+                p.extend([f"%{tok}%"] * len(cols))
 
         if f.get("aciklama"):
-            like_all("e.ara", f["aciklama"])
+            text_filter(["e.ara"], f["aciklama"])
         if f.get("taraf"):
-            for tok in fold(f["taraf"]).split():
-                w.append("(e.ara LIKE ? OR d.taraf_ara LIKE ?)")
-                p += [f"%{tok}%", f"%{tok}%"]
+            text_filter(["e.ara", "d.taraf_ara"], f["taraf"])
         if f.get("muvekkil"):
-            like_all("d.muvekkil_ara", f["muvekkil"])
+            text_filter(["d.muvekkil_ara"], f["muvekkil"])
         if f.get("sadece_muvekkilli"):
             w.append("d.muvekkil <> ''")
         if f.get("icerik"):
-            q = " ".join(f'"{t}"' for t in re.findall(r"\w+", f["icerik"]))
-            if q:
+            pos, neg = self.split_terms(f["icerik"])
+            fts = lambda terms: " ".join('"' + t.replace('"', '') + '"' for t in terms)  # noqa: E731
+            if pos:
                 w.append("e.id IN (SELECT rowid FROM evrak_fts WHERE evrak_fts MATCH ?)")
-                p.append(q)
+                p.append(fts(pos))
+            for t in neg:
+                w.append("e.id NOT IN (SELECT rowid FROM evrak_fts WHERE evrak_fts MATCH ?)")
+                p.append(fts([t]))
         if f.get("birim"):
-            like_all("fold_ac(d.birim)", f["birim"])
+            text_filter(["fold_ac(d.birim)"], f["birim"])
         if f.get("dosya_no"):
-            w.append("(d.dosya_no LIKE ? OR e.gonderen_dosya LIKE ? OR e.grup LIKE ?)")
-            p += [f"%{f['dosya_no']}%"] * 3
+            pos, neg = self.split_terms(f["dosya_no"])
+            for t in pos:
+                w.append("(d.dosya_no LIKE ? OR e.gonderen_dosya LIKE ? OR e.grup LIKE ?)")
+                p += [f"%{t}%"] * 3
+            for t in neg:
+                w.append("NOT (d.dosya_no LIKE ? OR COALESCE(e.gonderen_dosya,'') LIKE ? OR COALESCE(e.grup,'') LIKE ?)")
+                p += [f"%{t}%"] * 3
+        if f.get("tur"):
+            text_filter(["fold_ac(e.tur)"], f["tur"])
+        if f.get("baslangic"):
+            w.append("e.tarih >= ?")
+            p.append(f["baslangic"])
+        if f.get("bitis"):
+            w.append("e.tarih <= ?")
+            p.append(f["bitis"])
+        if f.get("son_gun"):
+            try:
+                gun = (dt.date.today() - dt.timedelta(days=int(f["son_gun"]))).isoformat()
+                w.append("e.tarih >= ?")
+                p.append(gun)
+            except (TypeError, ValueError):
+                pass
+        for key, sel in (f.get("sec") or {}).items():
+            if key not in self.FASETLER or not sel:
+                continue
+            col = f"COALESCE({self._faset_col(key, f)}, '')"
+            dahil, haric = list(sel.get("dahil") or []), list(sel.get("haric") or [])
+            if dahil:
+                w.append(f"{col} IN ({','.join('?' * len(dahil))})")
+                p += dahil
+            if haric:
+                w.append(f"{col} NOT IN ({','.join('?' * len(haric))})")
+                p += haric
+        # --- eski (CLI / önceki sürüm) anahtarları
         if f.get("dosya_tur"):
             w.append("d.dosya_tur = ?")
             p.append(f["dosya_tur"])
@@ -445,39 +505,22 @@ class Katalog:
         if f.get("dosya_durum") in ("Açık", "Kapalı"):
             w.append("d.durum = ?")
             p.append(f["dosya_durum"])
-        if f.get("baslangic"):
-            w.append("e.tarih >= ?")
-            p.append(f["baslangic"])
-        if f.get("bitis"):
-            w.append("e.tarih <= ?")
-            p.append(f["bitis"])
-        if f.get("son_gun"):
-            try:
-                w.append("e.tarih >= ?")
-                p.append((dt.date.today() - dt.timedelta(days=int(f["son_gun"]))).isoformat())
-            except (TypeError, ValueError):
-                pass
         turler = f.get("turler") or []
         if turler:
-            ph = ",".join("?" * len(turler))
-            w.append(f"e.ust_tur {'NOT IN' if f.get('tur_secim_haric') else 'IN'} ({ph})")
+            w.append(f"e.ust_tur {'NOT IN' if f.get('tur_secim_haric') else 'IN'} ({','.join('?' * len(turler))})")
             p += list(turler)
         kats = f.get("kategoriler") or []
         if kats:
             col = "e.ust_kategori" if f.get("kategori_ust") else "e.kategori"
-            ph = ",".join("?" * len(kats))
-            w.append(f"{col} {'NOT IN' if f.get('kategori_haric') else 'IN'} ({ph})")
+            w.append(f"{col} {'NOT IN' if f.get('kategori_haric') else 'IN'} ({','.join('?' * len(kats))})")
             p += list(kats)
-        if f.get("tur"):
-            like_all("fold_ac(e.tur)", f["tur"])
         if f.get("tur_haric"):
             for tok in [t.strip() for t in str(f["tur_haric"]).split(",") if t.strip()]:
                 w.append("e.ara NOT LIKE ?")
                 p.append(f"%{fold(tok)}%")
         uz = f.get("uzantilar") or []
         if uz:
-            ph = ",".join("?" * len(uz))
-            w.append(f"e.uzanti IN ({ph})")
+            w.append(f"e.uzanti IN ({','.join('?' * len(uz))})")
             p += list(uz)
         ek = f.get("ek")
         if ek == "asil":
@@ -493,6 +536,17 @@ class Katalog:
         if f.get("ayni_ad_tek"):
             w.append("e.ilk_ad = 1")
         return (" AND ".join(w) if w else "1=1"), p
+
+    def facet_counts(self, f: dict, key: str, limit: int = 3000) -> list:
+        """Bir liste filtresinin değerleri ve diğer filtrelere göre sayıları (kendi seçimi hariç)."""
+        self._ensure_funcs()
+        g = dict(f)
+        g["sec"] = {k: v for k, v in (f.get("sec") or {}).items() if k != key}
+        where, prm = self.build_where(g)
+        col = self._faset_col(key, f)
+        return [tuple(r) for r in self.db.execute(
+            f"SELECT COALESCE({col}, ''), COUNT(*) {self._BASE_FROM} WHERE {where} GROUP BY 1 ORDER BY 2 DESC LIMIT ?",
+            prm + [limit])]
 
     _BASE_FROM = "FROM evrak e LEFT JOIN dosya d ON d.dkey = e.dkey"
 
