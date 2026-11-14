@@ -265,18 +265,17 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
         return is_layiha and not is_ex
 
     if ft in ("tebligat", "tebligatlar", "mazbata"):
-        # Fiziki Tebligat ve Mazbatalar (e-Tebligat / UETS hariç)
+        # Hem Fiziki PTT hem de UETS / Elektronik Tebligat evrakları dahil edilir
         is_teb = any(k in tn for k in (
-            "tebligat mazbata", "tebliğ mazbata", "teblig mazbata",
-            "tebligat parça", "tebligat parca", "tebliğ şerhi", "teblig serhi",
-            "tebligat dönüş", "tebligat donus", "ptt dağıtım", "ptt dagitim",
-            "tebliğ evrak", "teblig evrak", "tebligat evrak", "normal tebligat",
-            "yurt dışı tebligat", "mernis tebligat", "21/2 tebligat", "ilanen tebligat",
+            "tebligat", "tebliğ", "teblig", "mazbata", "uets", "e-tebligat", "elektronik tebligat",
             "posta alındı", "posta alindi", "teslim tutanağı", "teslim tutanagi"
-        )) or (("tebligat" in tn or "tebliğ" in tn) and not any(k in tn for k in ("duruşma", "durusma", "karar", "dilekçe", "dilekce", "tensip")))
-        
-        is_elektronik = any(k in tn for k in ("e-tebligat", "elektronik tebligat", "uets"))
-        return is_teb and not is_elektronik
+        ))
+        is_ex = any(k in tn for k in (
+            "duruşma tutana", "durusma tutana", "celse zapt", "tensip zapt",
+            "gerekçeli karar", "gerekceli karar", "kısa karar", "kisa karar",
+            "bilirkişi raporu", "bilirkisi raporu", "keşif zapt"
+        )) and not any(k in tn for k in ("mazbata", "şerh", "serh", "parça", "parca", "uets", "e-tebligat", "elektronik"))
+        return is_teb and not is_ex
 
     if ft in ("muzekkere", "muzekkereler", "kurum_cevaplari"):
         is_muz = any(k in tn for k in (
@@ -2903,7 +2902,7 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         print("  3) Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)")
         print("  4) Tensip Zabıtları (İlk Tensip, Talimat Tensip Zaptı)")
         print("  5) Dava & Cevap Layihaları (Tüm Taraflar: Dava, Cevap, Replik, Düplik, Delil, İtiraz, Savunma)")
-        print("  6) Tebligat Evrakları ve Tebliğ Mazbataları (Fiziki PTT Mazbatalar & Barkodlu Tebliğ Sonuçları)")
+        print("  6) Tebligat & Mazbatalar (Fiziki PTT + UETS Elektronik Tebligat & Takip CSV'si)")
         print("  7) Müzekkere ve Kurum Cevapları (Banka, Tapu, SGK, EGM, HTS, Nüfus vb.)")
         print("  8) İddianame ve Ceza Başvuru Evrakları (İddianame, Fezleke, İddianame Kabul)")
         print("  9) Kesinleşme Şerhleri")
@@ -2951,7 +2950,7 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
         "tensip": "Tensip Zabıtları (İlk + Talimat Tensip)",
         "layihalar": "Dava & Cevap Layihaları ve Beyanlar (Tüm Taraflar)",
         "dilekce": "Dilekçeler ve Beyanlar (Dava, Cevap, İstinaf, Temyiz)",
-        "tebligat": "Tebligat Evrakları ve Tebliğ Mazbataları (Fiziki PTT)",
+        "tebligat": "Tebligat Evrakları ve Mazbatalar (Fiziki PTT + UETS Elektronik + Takip CSV'si)",
         "muzekkere": "Müzekkere ve Kurum Cevapları (Banka, Tapu, SGK, EGM vb.)",
         "iddianame": "İddianame ve Fezleke",
         "kesinlesme": "Kesinleşme Şerhleri",
@@ -3325,6 +3324,8 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                     muhatap=meta.get("muhatap", ""),
                     ptt_barkod=meta.get("ptt_barkod", ""),
                     teblig_sonuc=meta.get("teblig_sonuc", ""),
+                    hukuki_teblig_tarihi=meta.get("hukuki_teblig_tarihi", ""),
+                    is_uets=meta.get("is_uets", False),
                     evrak_id=doc_num,
                     ext=clean_ext
                 )
@@ -3354,6 +3355,34 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                     "is_emir_no": item.get("is_emir_no", ""),
                 }
                 app_helper._save_history()
+
+                # Eğer evrak Tebligat veya UETS ise detaylı takip kütüğüne (CSV) işle
+                is_teb_doc = any(k in tr_lower(item["evrak_adi"]) for k in ("tebligat", "tebliğ", "teblig", "mazbata", "uets"))
+                if is_teb_doc or evrak_filter in ("tebligat", "tebligatlar", "mazbata"):
+                    try:
+                        from tebligat_yoneticisi import record_tebligat_to_csv, parse_tebligat_meta, extract_text_from_file
+                        t_text = extract_text_from_file(target_path)
+                        t_meta = parse_tebligat_meta(t_text, evrak_adi=item["evrak_adi"], evrak_tarihi=item["tarih"])
+                        record_tebligat_to_csv({
+                            "Gonderim_Tarihi": item["tarih"] or t_meta.get("gonderim_tarihi", ""),
+                            "Tebligat_Turu": t_meta.get("tebligat_turu", "Fiziki PTT"),
+                            "Birim_Adi": item["birim_adi"],
+                            "Dosya_No": item["dosya_no"],
+                            "Dosyadaki_Muvekkil": meta.get("muvekkil", ""),
+                            "Muvekkil_Rolu": meta.get("muvekkil_rol", ""),
+                            "Tebligat_Muhatabi": meta.get("muhatap") or t_meta.get("muhatap", ""),
+                            "Muhatap_Rolu": t_meta.get("muhatap_rolu", ""),
+                            "Barkod_Veya_Delil_No": meta.get("ptt_barkod") or t_meta.get("barkod_veya_delil_no", ""),
+                            "Hukuki_Teblig_Tarihi": meta.get("hukuki_teblig_tarihi") or t_meta.get("hukuki_teblig_tarihi", ""),
+                            "Teblig_Durumu_Sonuc": meta.get("teblig_sonuc") or t_meta.get("teblig_sonuc", ""),
+                            "Yasal_Sure_Hesabi_Notu": t_meta.get("yasal_sure_notu", ""),
+                            "Evrak_Adi": item["evrak_adi"],
+                            "Evrak_Id": item.get("evrak_id", doc_num),
+                            "Dosya_Yolu": str(target_path),
+                            "Detayli_Icerik_Ozeti": t_meta.get("ozet_icerik", ""),
+                        })
+                    except Exception:
+                        pass
                 downloaded_now += 1
                 success = True
 

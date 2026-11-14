@@ -241,31 +241,55 @@ def extract_meta_from_udf(udf_path: Path) -> dict:
                             data["karsi_taraf"] = clean_n
                             break
 
-                # 9. Tebligat / Mazbata Bilgileri (Barkod, Muhatap, Sonuç)
-                m_ptt = re.search(r'\b([A-Z]{2}[0-9]{9}[A-Z]{2}|KP[0-9]{11}|[0-9]{13})\b', xml_text)
-                if m_ptt:
-                    data["ptt_barkod"] = m_ptt.group(1).strip()
+                # 9. Tebligat / Mazbata ve UETS Bilgileri
+                is_uets = (
+                    "uets" in t_lower
+                    or "elektronik tebligat" in t_lower
+                    or "delil kodu" in t_lower
+                    or "pttkep" in t_lower
+                )
+                if is_uets:
+                    data["is_uets"] = True
+                    data["tebligat_turu"] = "UETS Elektronik"
+                    m_delil = re.search(r'(?:Delil\s*No|Delil\s*Numarası|İşlem\s*ID|UETS\s*No|Delil\s*Kodu)\s*[:\s]+([0-9a-zA-Z\-_]{8,35})', xml_text, re.IGNORECASE)
+                    if m_delil:
+                        data["ptt_barkod"] = m_delil.group(1).strip()
+                    m_tarih = re.search(r'(?:Ulaşma|İletim|Postalanma|Gönderim)\s*(?:Zamanı|Tarihi)?\s*[:\s]+([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{4})', xml_text, re.IGNORECASE)
+                    if m_tarih:
+                        try:
+                            from tebligat_yoneticisi import calculate_uets_legal_date
+                            h_tarih, h_not = calculate_uets_legal_date(m_tarih.group(1))
+                            data["hukuki_teblig_tarihi"] = h_tarih
+                            data["yasal_sure_notu"] = h_not
+                        except Exception:
+                            pass
+                    data["teblig_sonuc"] = "UETS-Teblig-Edildi"
+                else:
+                    data["tebligat_turu"] = "Fiziki PTT"
+                    m_ptt = re.search(r'\b([A-Z]{2}[0-9]{9}[A-Z]{2}|KP[0-9]{11}|[0-9]{13})\b', xml_text)
+                    if m_ptt:
+                        data["ptt_barkod"] = m_ptt.group(1).strip()
 
-                m_muh = re.search(r'(?:Muhatap|Kime|Tebliğ\s*Edilen|Tebliğ\s*Çıkarılan|Sayın)\s*[:\-]?\s*([A-ZÇĞİÖŞÜa-zçğıöşü\s]{3,40}?)(?:\n|\r|\t|TC|T\.C|\-|,)', xml_text, re.IGNORECASE)
+                m_muh = re.search(r'(?:Muhatap|Kime|Tebliğ\s*Edilen|Tebliğ\s*Çıkarılan|Sayın|Alıcı)\s*[:\-]?\s*([A-ZÇĞİÖŞÜa-zçğıöşü\s]{3,40}?)(?:\n|\r|\t|TC|T\.C|\-|,|UETS)', xml_text, re.IGNORECASE)
                 if m_muh:
                     data["muhatap"] = clean_party_name(m_muh.group(1))
 
                 # Tebliğ Durumu / Sonucu Tespiti
-                t_lower = tr_lower(xml_text)
-                if any(k in t_lower for k in ("21/2", "21. madde", "mernis 21")):
-                    data["teblig_sonuc"] = "Teblig-Mernis-21-2"
-                elif any(k in t_lower for k in ("muhtara teslim", "mahalle muhtar")):
-                    data["teblig_sonuc"] = "Teblig-Muhtar"
-                elif any(k in t_lower for k in ("bizzat tebliğ", "kendisine tebliğ", "bizzat teslim")):
-                    data["teblig_sonuc"] = "Teblig-Bizzat"
-                elif any(k in t_lower for k in ("vekiline tebliğ", "vekiline teslim", "avukatına tebliğ")):
-                    data["teblig_sonuc"] = "Teblig-Vekile"
-                elif any(k in t_lower for k in ("bila tebliğ", "iade", "adreste tanınmıyor", "taşınmış", "adres yetersiz", "teslim edilemedi")):
-                    data["teblig_sonuc"] = "Iade-Edildi"
-                elif "tebliğ edildi" in t_lower or "teblig edildi" in t_lower or "teslim edildi" in t_lower:
-                    data["teblig_sonuc"] = "Teblig-Edildi"
-                elif "dağıtımda" in t_lower or "sevk edildi" in t_lower:
-                    data["teblig_sonuc"] = "Dagitimda"
+                if not is_uets:
+                    if any(k in t_lower for k in ("21/2", "21. madde", "mernis 21")):
+                        data["teblig_sonuc"] = "Teblig-Mernis-21-2"
+                    elif any(k in t_lower for k in ("muhtara teslim", "mahalle muhtar")):
+                        data["teblig_sonuc"] = "Teblig-Muhtar"
+                    elif any(k in t_lower for k in ("bizzat tebliğ", "kendisine tebliğ", "bizzat teslim")):
+                        data["teblig_sonuc"] = "Teblig-Bizzat"
+                    elif any(k in t_lower for k in ("vekiline tebliğ", "vekiline teslim", "avukatına tebliğ")):
+                        data["teblig_sonuc"] = "Teblig-Vekile"
+                    elif any(k in t_lower for k in ("bila tebliğ", "iade", "adreste tanınmıyor", "taşınmış", "adres yetersiz", "teslim edilemedi")):
+                        data["teblig_sonuc"] = "Iade-Edildi"
+                    elif "tebliğ edildi" in t_lower or "teblig edildi" in t_lower or "teslim edildi" in t_lower:
+                        data["teblig_sonuc"] = "Teblig-Edildi"
+                    elif "dağıtımda" in t_lower or "sevk edildi" in t_lower:
+                        data["teblig_sonuc"] = "Dagitimda"
 
     except Exception:
         pass
@@ -350,6 +374,8 @@ def build_enriched_filename(
     muhatap: str = "",
     ptt_barkod: str = "",
     teblig_sonuc: str = "",
+    hukuki_teblig_tarihi: str = "",
+    is_uets: bool = False,
     evrak_id: str = "",
     ext: str = ".udf"
 ) -> str:
@@ -394,7 +420,10 @@ def build_enriched_filename(
     if muhatap:
         extras.append(f"Muhatap-{sanitize_name_component(muhatap, 25)}")
     if ptt_barkod:
-        extras.append(f"PTT-{sanitize_name_component(ptt_barkod, 15)}")
+        tag = "UETS" if is_uets else "PTT"
+        extras.append(f"{tag}-{sanitize_name_component(ptt_barkod, 18)}")
+    if hukuki_teblig_tarihi:
+        extras.append(f"TebligT-{sanitize_name_component(hukuki_teblig_tarihi.replace('/', '.'), 12)}")
     if teblig_sonuc:
         extras.append(sanitize_name_component(teblig_sonuc, 25))
 

@@ -45,7 +45,7 @@ case "$secim" in
         echo "  3) Gerekçeli Karar, Hüküm ve İlamlar (BAM, Yargıtay, Kısa Karar, Ek Karar)"
         echo "  4) Tensip Zabıtları (İlk + Talimat Tensip Zaptı)"
         echo "  5) Dava & Cevap Layihaları (Tüm Taraflar: Dava, Cevap, Replik, Düplik, Delil, İtiraz, Savunma)"
-        echo "  6) Tebligat Evrakları ve Tebliğ Mazbataları (Fiziki PTT Barkodlu Mazbatalar & Tebliğ Sonuçları)"
+        echo "  6) Tebligat & Mazbatalar (Fiziki PTT + UETS Elektronik Tebligat & Takip CSV'si)"
         echo "  7) Müzekkere ve Kurum Cevapları (Banka, Tapu, SGK, EGM, HTS, Nüfus vb.)"
         echo "  8) İddianame ve Fezleke (Ceza Soruşturma / Kovuşturma)"
         echo "  9) Kesinleşme Şerhleri"
