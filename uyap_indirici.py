@@ -2298,8 +2298,8 @@ class UyapDownloaderApp:
         ttk.Button(frow3, text="Klasör Seç...", command=self.on_choose_dir).pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(frow3, text="Bekleme (sn):").pack(side=tk.LEFT)
-        self.var_min_delay = tk.DoubleVar(value=2.0)
-        self.var_max_delay = tk.DoubleVar(value=4.0)
+        self.var_min_delay = tk.DoubleVar(value=1.0)
+        self.var_max_delay = tk.DoubleVar(value=2.0)
         ttk.Spinbox(frow3, from_=1.0, to=30.0, increment=0.5, textvariable=self.var_min_delay, width=4).pack(side=tk.LEFT, padx=1)
         ttk.Label(frow3, text="-").pack(side=tk.LEFT)
         ttk.Spinbox(frow3, from_=1.5, to=60.0, increment=0.5, textvariable=self.var_max_delay, width=4).pack(side=tk.LEFT, padx=(1, 8))
@@ -4493,12 +4493,12 @@ def run_cli_mode(args):
         return
 
     # 7. Güvenli Hızlı İndirme Döngüsü
-    min_d = 1.2
-    max_d = 2.8
-    batch_n = 20
-    batch_pause = 10.0
+    min_d = 0.6
+    max_d = 1.2
+    batch_n = 30
+    batch_pause = 6.0
     downloaded_now = 0
-    max_retries = 3
+    max_retries = 5
 
     print(f"[*] Güvenli hızlı indirme başlatılıyor ({min_d}-{max_d} sn bekleme, her {batch_n} dosyada {batch_pause:.0f} sn mola)...")
 
