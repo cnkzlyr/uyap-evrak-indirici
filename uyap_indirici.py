@@ -46,6 +46,12 @@ import shutil
 import requests
 import websocket
 
+from enrich_and_rename_documents import (
+    extract_meta_from_udf,
+    update_udf_properties,
+    build_enriched_filename,
+)
+
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
@@ -3186,19 +3192,46 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                 alt_kat = infer_evrak_alt_kategori(item["evrak_adi"])
                 clean_ev_id = str(item.get("evrak_id") or "").replace('"', '').replace("'", "").strip()
                 doc_num = sanitize_path_part(item.get("is_emir_no") or clean_ev_id[:8], max_len=20)
-                e_slug = sanitize_path_part(item["evrak_adi"], max_len=60)
-                file_name = f"{item['tarih']}_{e_slug}_{doc_num}{clean_ext}"
-                target_path = target_base / yargi_slug / b_slug / d_slug / alt_kat / file_name
-                target_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                target_folder = target_base / yargi_slug / b_slug / d_slug / alt_kat
+                target_folder.mkdir(parents=True, exist_ok=True)
 
-                tmp_path = target_path.with_suffix(target_path.suffix + ".part")
+                # Geçici dosyaya yazıp içeriği analiz et ve zenginleştir
+                tmp_path = target_folder / f"temp_{doc_num}{clean_ext}.part"
                 tmp_path.write_bytes(raw_bytes)
 
-                if tmp_path.exists() and tmp_path.stat().st_size == len(raw_bytes):
+                meta = {}
+                if clean_ext == ".udf":
+                    try:
+                        meta = extract_meta_from_udf(tmp_path)
+                        meta["mahkeme"] = item.get("birim_adi") or meta.get("mahkeme", "")
+                        meta["dosya_no"] = item.get("dosya_no") or meta.get("dosya_no", "")
+                        meta["evrak_tarihi"] = item.get("tarih") or ""
+                        meta["evrak_turu"] = item.get("evrak_adi") or item.get("evrak_turu", "")
+                        meta["evrak_id"] = doc_num
+                        update_udf_properties(tmp_path, meta)
+                    except Exception:
+                        pass
+
+                file_name = build_enriched_filename(
+                    tarih=item["tarih"],
+                    birim=item["birim_adi"],
+                    dosya_no=item["dosya_no"],
+                    muvekkil=meta.get("muvekkil", ""),
+                    evrak_turu=item["evrak_adi"],
+                    karar_no=meta.get("karar_no", ""),
+                    durusma_tarihi=meta.get("durusma_tarihi", ""),
+                    celse_no=meta.get("celse_no", ""),
+                    baglantili_dosya=meta.get("baglantili_dosya", ""),
+                    evrak_id=doc_num,
+                    ext=clean_ext
+                )
+
+                target_path = target_folder / file_name
+                if tmp_path.exists():
                     tmp_path.replace(target_path)
                 else:
                     target_path.write_bytes(raw_bytes)
-                    tmp_path.unlink(missing_ok=True)
 
                 auto_convert_udf_to_pdf(target_path)
 
