@@ -536,13 +536,43 @@ def main():
                     print(f"[{idx}] {udf.name}\n  --> {new_name}\n")
 
     # 3. AŞAMA: indirme_gecmisi.json ve indeks dosyalarını güncelle
-    if not args.dry_run and path_remap and history:
+    if not args.dry_run and history:
+        # Normalize path_remap with realpath
+        real_remap = {os.path.realpath(k): v for k, v in path_remap.items()}
+        for k, v in path_remap.items():
+            real_remap[k] = v
+
+        # Build ID index of disk files
+        id_to_file = {}
+        for p in glob.glob(str(base_dir / "**/*"), recursive=True):
+            if os.path.isfile(p):
+                m_id = re.search(r'(?:evrak_|islem_|_)([0-9]+)\.(?:udf|pdf|png|jpe?g)$', os.path.basename(p), re.IGNORECASE)
+                if m_id:
+                    doc_id = m_id.group(1)
+                    if doc_id not in id_to_file or p.endswith('.udf'):
+                        id_to_file[doc_id] = p
+
         updated_history_entries = 0
         for k, v in history.items():
-            old_p = v.get("path")
-            if old_p in path_remap:
-                v["path"] = path_remap[old_p]
+            old_p = v.get("path", "")
+            real_old = os.path.realpath(old_p) if old_p else ""
+            if old_p in real_remap:
+                v["path"] = real_remap[old_p]
                 updated_history_entries += 1
+            elif real_old in real_remap:
+                v["path"] = real_remap[real_old]
+                updated_history_entries += 1
+            elif not os.path.exists(old_p):
+                m_id = re.search(r'([0-9]+)$', k)
+                doc_id = m_id.group(1) if m_id else None
+                if not doc_id:
+                    m_id2 = re.search(r'_([0-9]+)\.(?:udf|pdf)$', old_p)
+                    if m_id2:
+                        doc_id = m_id2.group(1)
+                if doc_id and doc_id in id_to_file:
+                    v["path"] = id_to_file[doc_id]
+                    updated_history_entries += 1
+
         try:
             history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"[✓] indirme_gecmisi.json güncellendi: {updated_history_entries} kayıt yeni dosya yollarına bağlandı.")
