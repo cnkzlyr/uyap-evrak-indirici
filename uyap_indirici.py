@@ -1068,28 +1068,33 @@ class UyapBrowserBridge:
             if (err && err.innerText.trim()) {
                 return {error: err.innerText.trim()};
             }
-            const text = document.body.innerText || "";
-            if (text.includes("Parmak İzi") || text.includes("operatör") || text.includes("bekleniyor")) {
-                return {ok: true, step: "already_waiting_fp"};
-            }
+            // 1. Önce İmzala / Onayla butonunu ara ve tıkla
             const btn = Array.from(document.querySelectorAll('button, input[type="submit"], input[name="submitButton"], .btn-send')).find(b => {
                 const txt = (b.innerText || b.value || '').trim();
-                return txt.includes("İmzala") || txt === "Onayla";
+                return txt === "İmzala" || txt.includes("İmzala") || txt === "Onayla";
             });
             if (btn) {
                 btn.click();
                 return {ok: true, step: "clicked_imzala"};
             }
+
+            // 2. İmzala butonu yoksa, parmak izi / operatör bekleme ekranında mıyız kontrol et
+            const text = document.body.innerText || "";
+            if (text.includes("İşlemin Parmak İzi") || text.includes("operatorden cevap bekleniyor") || text.includes("parmak izi (2) görüntülenecektir")) {
+                return {ok: true, step: "already_waiting_fp"};
+            }
             return {waiting: true};
         })()
         """
-        for _ in range(15):
+        for _ in range(20):
             time.sleep(0.6)
             try:
                 s_res = self.eval_js(js_sign, timeout=6.0)
                 if s_res and s_res.get("error"):
                     return False, f"e-Devlet Hatası: {s_res['error']}"
                 if s_res and s_res.get("ok"):
+                    if s_res.get("step") == "clicked_imzala":
+                        time.sleep(1.5)
                     break
             except Exception:
                 pass
@@ -1101,8 +1106,8 @@ class UyapBrowserBridge:
         (() => {
             const text = document.body.innerText || "";
             let fp = "";
-            const m = text.match(/(?:İşlemin\\s+)?Parmak\\s+İzi\\s*[:\\-]?\\s*([A-F0-9\\s]{8,})/i) ||
-                      text.match(/([A-F0-9]{4}\\s+[A-F0-9]{4}\\s+[A-F0-9]{4})/i);
+            const m = text.match(/(?:İşlemin\\s+)?Parmak\\s+İzi\\s*[:\\-]?\\s*([A-F0-9]{4}(?:\\s+[A-F0-9]{4})+)/i) ||
+                      text.match(/([A-F0-9]{4}(?:\\s+[A-F0-9]{4}){3,})/i);
             if (m) {
                 fp = m[1].trim();
             }
@@ -1116,7 +1121,7 @@ class UyapBrowserBridge:
         """
         fp_str = ""
         for _ in range(25):
-            time.sleep(0.5)
+            time.sleep(0.6)
             try:
                 st = self.eval_js(js_wait_fp, timeout=5.0)
                 if st and st.get("fingerprint"):
