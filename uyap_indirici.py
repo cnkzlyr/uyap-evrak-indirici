@@ -176,11 +176,17 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
         return True
 
     if ft == "durusma":
-        is_d = any(k in tn for k in ("duruşma", "durusma", "celse zaptı", "celse zabti", "celse tutana", "segbis"))
+        is_d = (
+            (("duruşma" in tn or "durusma" in tn or "celse" in tn) and ("zapt" in tn or "tutana" in tn))
+            or ("segbis" in tn and ("zapt" in tn or "tutana" in tn or "çözüm" in tn or "cozum" in tn))
+        )
         is_ex = any(k in tn for k in (
-            "tensip", "zaptolunan", "arama", "yakalama", "kura", "tevzi", "teslim",
-            "tesellüm", "emanet", "diğer tutanak", "diger tutanak", "ifade", "sorgu",
-            "ihzar", "otopsi", "muayene", "adli kontrol tutana"
+            "talep", "talebi", "müzekkere", "muzekkere", "celp", "celbi",
+            "davetiye", "tebligat", "tebliğ", "teblig", "çağrı", "cagri",
+            "dilekçe", "dilekce", "mazeret", "tensip", "zaptolunan", "arama",
+            "yakalama", "kura", "tevzi", "teslim", "tesellüm", "emanet",
+            "diğer tutanak", "diger tutanak", "ifade", "sorgu", "ihzar",
+            "otopsi", "muayene", "adli kontrol tutana", "vekalet", "yetki belgesi"
         ))
         return is_d and not is_ex
 
