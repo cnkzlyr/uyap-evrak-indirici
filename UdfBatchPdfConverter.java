@@ -88,6 +88,35 @@ public class UdfBatchPdfConverter {
         System.setErr(devNull);
 
         Class<?> bClass = Class.forName("tr.com.havelsan.uyap.system.editor.b.b");
+
+        // FontMapper yapılandırması: Times New Roman ve sistem fontlarını kaydet ve PDF'e göm (embedded=true)
+        try {
+            Method getMapper = bClass.getDeclaredMethod("a");
+            getMapper.setAccessible(true);
+            Object cObj = getMapper.invoke(null);
+
+            Class<?> cClass = Class.forName("tr.com.havelsan.uyap.system.editor.b.c");
+            Method regDir = cClass.getMethod("a", String.class);
+
+            regDir.invoke(cObj, "/data/data/com.termux/files/home/.fonts/microsoft");
+            regDir.invoke(cObj, "/data/data/com.termux/files/home/.fonts");
+            regDir.invoke(cObj, "/system/fonts");
+            regDir.invoke(cObj, "/data/data/com.termux/files/usr/share/fonts");
+
+            Method getA = cClass.getMethod("a");
+            java.util.HashMap map = (java.util.HashMap) getA.invoke(cObj);
+
+            Class<?> dClass = Class.forName("tr.com.havelsan.uyap.system.editor.b.d");
+            for (java.lang.reflect.Field f : dClass.getFields()) {
+                if (f.getType() == boolean.class) {
+                    for (Object dObj : map.values()) {
+                        f.setBoolean(dObj, true); // embedded = true: Türkçe karakterler ve TrueType fontu PDF içine göm
+                    }
+                    break;
+                }
+            }
+        } catch (Throwable ignored) {}
+
         Method mConvert = bClass.getMethod("a", OutputStream.class, ByteArrayInputStream.class);
 
         int threads = Math.min(6, Math.max(2, Runtime.getRuntime().availableProcessors()));
