@@ -1373,6 +1373,27 @@ class UyapBrowserBridge:
     })()
     """
 
+    def _edevlet_page_message(self) -> str:
+        """e-Devlet sayfasındaki uyarı/hata metnini bulur (seçicilerle yakalanamayan mesajlar için);
+        sayfanın kısa bir özetini ayrıntılı günlüğe yazar. Kişisel veri (TC/GSM) maskelenir."""
+        js = r"""(() => {
+            const t = (document.body && document.body.innerText) || "";
+            return {url: location.href, text: t.slice(0, 4000)};
+        })()"""
+        try:
+            r = self.eval_js(js, timeout=8.0, retries=0, target="auto") or {}
+        except Exception:
+            return ""
+        text = re.sub(r"\b\d{10,11}\b", "***", str(r.get("text") or ""))
+        file_logger.info("e-Devlet sayfası (%s): %s", r.get("url"), text[:1500].replace("\n", " | "))
+        keys = ("hata", "başarısız", "basarisiz", "geçersiz", "gecersiz", "uyuşm", "abone", "operatör",
+                "iptal", "zaman aşımı", "zaman asimi", "bulunamadı", "sertifika", "reddedildi", "deneyiniz", "uyarı")
+        for line in text.splitlines():
+            ln = line.strip()
+            if 8 < len(ln) < 300 and any(k in tr_lower(ln) for k in keys):
+                return ln
+        return ""
+
     def login_with_mobil_imza(
         self,
         tc: str,
@@ -1517,7 +1538,9 @@ class UyapBrowserBridge:
                             return False, "Test: form dolduruldu, gönderilmedi."
                         filled_at = time.time()
                     elif time.time() - filled_at > 25:
-                        return False, "Mobil İmza formu gönderildi ama e-Devlet ilerlemedi. Bilgileri kontrol edin."
+                        why = self._edevlet_page_message()
+                        return False, ("Mobil İmza formu gönderildi ama e-Devlet ilerlemedi"
+                                       + (f": {why}" if why else ". Bilgileri (TC, GSM, operatör) kontrol edin."))
                 elif page == "taahhut":
                     if time.time() - signed_at > 8:
                         signed_at = time.time()

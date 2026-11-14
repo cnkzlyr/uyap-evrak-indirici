@@ -799,7 +799,9 @@ class KatalogApp:
             if not self.login_method and not self._ask_method_blocking():
                 return False
             m = self.login_method
-            if m[0] == "eimza":
+            if m[0] == "elle":
+                ok, msg = self._manual_login()
+            elif m[0] == "eimza":
                 self.log("[*] e-İmza ile giriş yapılıyor...")
                 ok, msg = self.bridge.auto_relogin(m[1])
             else:
@@ -817,6 +819,37 @@ class KatalogApp:
             self.login_method = None
             self.ui_q.put(("session", "Oturum: kapalı", False))
         return False
+
+    def _manual_login(self, bekle_sn: int = 300) -> tuple:
+        """Görünür tarayıcıda UYAP giriş sayfasını açar; kullanıcı girene kadar bekler."""
+        b = self.bridge
+        if getattr(b, "is_headless", False) and b._is_port_open():
+            # Gizli tarayıcıyı kapat, aynı profille görünür aç (çerezler korunur)
+            try:
+                ver = b._cdp_http("/json/version") or {}
+                b._ws_call(ver["webSocketDebuggerUrl"].replace("localhost", "127.0.0.1"), "Browser.close", {}, timeout=5)
+            except Exception:
+                pass
+            for _ in range(20):
+                if not b._is_port_open():
+                    break
+                time.sleep(0.5)
+        ok, msg = b.ensure_browser(headless=False)
+        if not ok:
+            return False, f"Görünür tarayıcı açılamadı: {msg}"
+        self.var_headless.set(False)
+        b.navigate(self.ui.UYAP_BASE_URL + "/giris", target="auto")
+        self.log("[*] Açılan tarayıcı penceresinde UYAP'a giriş yapın (e-İmza veya Mobil İmza). "
+                 f"Giriş yapılınca program kendiliğinden devam eder (en fazla {bekle_sn // 60} dk).")
+        self.ui_q.put(("toast", "Tarayıcı penceresinde UYAP'a giriş yapın.\nGiriş yapılınca otomatik devam edilecek."))
+        t0 = time.time()
+        while time.time() - t0 < bekle_sn:
+            if self.motor.stop_flag.is_set():
+                return False, "Durduruldu"
+            if b.is_logged_in():
+                return True, "Tarayıcıdan giriş yapıldı"
+            time.sleep(3)
+        return False, "Süre doldu: tarayıcıda giriş yapılmadı"
 
     def _ask_login(self, ark_ok: bool, ev: threading.Event, box: dict):
         cfg = self.ui.load_user_config()
@@ -845,10 +878,20 @@ class KatalogApp:
         opf = ttk.Frame(frm); opf.grid(row=6, column=1, sticky="w")
         for t, v in (("Turkcell", "1"), ("Vodafone", "2"), ("Türk Telekom", "3")):
             ttk.Radiobutton(opf, text=t, variable=op, value=v).pack(side="left")
+        ttk.Radiobutton(frm, text="Tarayıcıda kendim gireceğim (görünür UYAP penceresi açılır)", variable=mode,
+                        value="elle").grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(frm, text="e-İmza/Mobil İmza burada çalışmazsa bunu seçin: UYAP'a normal şekilde girin, program\n"
+                            "girişi kendisi fark edip kaldığı yerden devam eder (en fazla 5 dk bekler).",
+                  foreground="#555").grid(row=8, column=0, columnspan=2, sticky="w")
         ttk.Label(frm, text="PIN yalnızca bu oturum boyunca bellekte tutulur, kaydedilmez.",
-                  foreground="#666").grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                  foreground="#666").grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         def ok():
+            if mode.get() == "elle":
+                box["method"] = ("elle",)
+                w.destroy()
+                ev.set()
+                return
             if mode.get() == "eimza":
                 if not pin.get().strip():
                     messagebox.showwarning("PIN", "PIN girin.", parent=w)
@@ -868,7 +911,7 @@ class KatalogApp:
             w.destroy()
             ev.set()
 
-        bf = ttk.Frame(frm); bf.grid(row=8, column=0, columnspan=2, pady=(10, 0))
+        bf = ttk.Frame(frm); bf.grid(row=10, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(bf, text="Giriş yap", command=ok).pack(side="left", padx=4)
         ttk.Button(bf, text="Vazgeç", command=cancel).pack(side="left", padx=4)
         w.protocol("WM_DELETE_WINDOW", cancel)
