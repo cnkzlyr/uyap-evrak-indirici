@@ -17,9 +17,10 @@ echo "  4) Dava Dosyalarından TÜM Evrakları ve EKLERİ İndir (Toplu Arşiv)"
 echo "  5) Duruşma Takvimi Oluştur (.ics / Google Takvim + CSV)"
 echo "  6) Termux:X11 Grafik Arayüz Modu (Telefonda Pencere Açılır)"
 echo "  7) Arka Planda Başlat (Headless Chromium)"
+echo "  8) İndirilen UDF'leri PDF'e Dönüştür (Toplu Vektörel PDF)"
 echo ""
 echo "=================================================================="
-read -p "Seçiminiz (1-7) [Varsayılan: 1]: " secim
+read -p "Seçiminiz (1-8) [Varsayılan: 1]: " secim
 
 case "$secim" in
     2)
@@ -151,6 +152,11 @@ case "$secim" in
         echo ""
         echo "[*] Arka Planda Headless Mod başlatılıyor..."
         python3 uyap_indirici.py --cli --headless
+        ;;
+    8)
+        echo ""
+        echo "[*] Tüm İndirilen UDF Belgeleri PDF Formatına Dönüştürülüyor..."
+        ./udf_toplu_pdf.sh /sdcard/Download/UYAP_Indirilenler
         ;;
     *)
         echo ""

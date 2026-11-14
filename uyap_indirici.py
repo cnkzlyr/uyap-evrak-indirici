@@ -237,6 +237,33 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
     return ft in tn
 
 
+def auto_convert_udf_to_pdf(target_path: Path):
+    """Eğer indirilen dosya .udf ise Havelsan motoruyla aynı adda .pdf kopyasını oluşturur."""
+    try:
+        p = Path(target_path)
+        if not p.exists() or p.suffix.lower() != ".udf":
+            return
+        pdf_path = p.with_suffix(".pdf")
+        if pdf_path.exists() and pdf_path.stat().st_size > 0:
+            return
+        jars_dir = Path("/data/data/com.termux/files/home/jars")
+        script_dir = Path(__file__).resolve().parent
+        cp = f"{script_dir}:{jars_dir}/*"
+        cmd = [
+            "java", "-Xmx256m", "-Djava.awt.headless=true",
+            "--add-opens=java.base/java.util=ALL-UNNAMED",
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
+            "--add-opens=java.desktop/javax.swing=ALL-UNNAMED",
+            "-cp", cp,
+            "uyap.UdfBatchPdfConverter",
+            str(p)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)
+    except Exception:
+        pass
+
+
 def infer_dosya_turu(birim_adi: str, explicit_tur: str = "") -> str:
     """Birim adından veya açık dosya türünden anlamlı bir Dosya/Yargı Türü kategorisi çıkarır."""
     if explicit_tur and explicit_tur.strip():
@@ -2592,6 +2619,8 @@ class UyapDownloaderApp:
                                 target_path.write_bytes(raw_bytes)
                                 tmp_path.unlink(missing_ok=True)
 
+                            auto_convert_udf_to_pdf(target_path)
+
                             sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
 
                             self.history[ukey] = {
@@ -3170,6 +3199,8 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                 else:
                     target_path.write_bytes(raw_bytes)
                     tmp_path.unlink(missing_ok=True)
+
+                auto_convert_udf_to_pdf(target_path)
 
                 sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
 
@@ -3871,6 +3902,8 @@ def run_cli_mode(args):
                 else:
                     target_path.write_bytes(raw_bytes)
                     tmp_path.unlink(missing_ok=True)
+
+                auto_convert_udf_to_pdf(target_path)
 
                 sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
 
