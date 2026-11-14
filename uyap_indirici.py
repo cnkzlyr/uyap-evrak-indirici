@@ -1541,20 +1541,20 @@ class UyapBrowserBridge:
 
 FOLDER_PRESETS = [
     (
-        "Dosya Türü / Evrak Türü / İşlem Türü / Yıl-Ay (Önerilen)",
-        "{dosya_turu}/{evrak_turu}/{islem_turu}/{yil_ay}/{tarih}_{birim_adi}_{dosya_no}_{evrak_adi}",
+        "İşlemlerim / Dosya Türü / Evrak Türü / İşlem Türü / Yıl-Ay (Önerilen)",
+        "ISLEMLERIM/{dosya_turu}/{evrak_turu}/{islem_turu}/{yil_ay}/{tarih}_{birim_adi}_{dosya_no}_{evrak_adi}",
     ),
     (
-        "Yıl-Ay / Dosya Türü / Birim & Dosya No / Evrak Türü",
-        "{yil_ay}/{dosya_turu}/{birim_adi}_{dosya_no}/{evrak_turu}/{tarih}_{evrak_adi}",
+        "İşlemlerim / Yıl-Ay / Dosya Türü / Birim & Dosya No / Evrak Türü",
+        "ISLEMLERIM/{yil_ay}/{dosya_turu}/{birim_adi}_{dosya_no}/{evrak_turu}/{tarih}_{evrak_adi}",
     ),
     (
-        "Dosya Türü / Birim & Dosya No / İşlem Türü / Evrak Türü",
-        "{dosya_turu}/{birim_adi}_{dosya_no}/{islem_turu}/{evrak_turu}/{tarih}_{evrak_adi}",
+        "İşlemlerim / Dosya Türü / Birim & Dosya No / İşlem Türü / Evrak Türü",
+        "ISLEMLERIM/{dosya_turu}/{birim_adi}_{dosya_no}/{islem_turu}/{evrak_turu}/{tarih}_{evrak_adi}",
     ),
     (
-        "İşlem Türü / Dosya Türü / Evrak Türü / Tarih",
-        "{islem_turu}/{dosya_turu}/{evrak_turu}/{yil_ay}/{tarih}_{birim_adi}_{dosya_no}_{evrak_adi}",
+        "İşlemlerim / İşlem Türü / Dosya Türü / Evrak Türü / Tarih",
+        "ISLEMLERIM/{islem_turu}/{dosya_turu}/{evrak_turu}/{yil_ay}/{tarih}_{birim_adi}_{dosya_no}_{evrak_adi}",
     ),
 ]
 
@@ -1604,6 +1604,12 @@ class UyapDownloaderApp:
             if not path_str:
                 continue
             fp = Path(path_str)
+            if not fp.exists():
+                if "/ISLEMLERIM/" not in path_str and "/UYAP_Indirilenler/" in path_str:
+                    alt_fp = Path(path_str.replace("/UYAP_Indirilenler/", "/UYAP_Indirilenler/ISLEMLERIM/"))
+                    if alt_fp.exists():
+                        fp = alt_fp
+                        v["path"] = str(alt_fp)
             if not fp.exists():
                 continue
             try:
@@ -1690,6 +1696,12 @@ class UyapDownloaderApp:
         if not path_str:
             return False
         fp = Path(path_str)
+        if not fp.exists():
+            if "/ISLEMLERIM/" not in path_str and "/UYAP_Indirilenler/" in path_str:
+                alt_p = Path(path_str.replace("/UYAP_Indirilenler/", "/UYAP_Indirilenler/ISLEMLERIM/"))
+                if alt_p.exists():
+                    entry["path"] = str(alt_p)
+                    fp = alt_p
         if not fp.exists() or fp.stat().st_size < 128:
             return False
         return True
