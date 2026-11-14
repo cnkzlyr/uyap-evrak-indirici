@@ -7,7 +7,7 @@ Temel Yetenekler ve Güvenlik Önlemleri:
 1. Chromium Entegrasyonu (CDP - Port 9223):
    - Tarayıcıyı özel hata ayıklama portuyla yönetir veya mevcut açık UYAP sekmesine bağlanır.
 2. Otomatik e-İmza ile Giriş ve Oturum Kurtarma (ArkSigner localhost:5975 Köprüsü):
-   - Oturum kapandığında, düştüğünde veya hata aldığında kullanıcının PIN kodu (455625)
+   - Oturum kapandığında, düştüğünde veya hata aldığında kullanıcının PIN kodu
      ile ArkSigner üzerinden otomatik challenge imzalayıp UYAP oturumunu kesintisiz tazeler.
 3. Sahte HTML / Hata Sayfası Koruması (Kesin İçerik Doğrulama & Atomik Kayıt):
    - Oturum düşmesiyle dönen HTML sayfalarını veya JSON hata yanıtlarını ASLA UDF/PDF
@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import pathlib
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -308,9 +309,15 @@ def auto_convert_udf_to_pdf(target_path: Path):
         pdf_path = p.with_suffix(".pdf")
         if pdf_path.exists() and pdf_path.stat().st_size > 0:
             return
-        jars_dir = Path("/data/data/com.termux/files/home/jars")
         script_dir = Path(__file__).resolve().parent
-        cp = f"{script_dir}:{jars_dir}/*"
+        if (script_dir / "jars").exists():
+            jars_dir = script_dir / "jars"
+        elif (script_dir.parent / "jars").exists():
+            jars_dir = script_dir.parent / "jars"
+        else:
+            jars_dir = Path("/data/data/com.termux/files/home/jars")
+
+        cp = f"{script_dir}{os.pathsep}{jars_dir / '*'}"
         cmd = [
             "java", "-Xmx256m", "-Djava.awt.headless=true",
             "--add-opens=java.base/java.util=ALL-UNNAMED",
@@ -659,21 +666,97 @@ def is_valid_document_bytes(raw_bytes: bytes, content_type: str = "") -> tuple[b
 # CDP (Chrome DevTools Protocol) ve ArkSigner e-İmza Bağlantı Yöneticisi
 # ---------------------------------------------------------------------------
 
+class UyapBrowserError(RuntimeError):
+    """Tarayıcıya / CDP portuna ulaşılamadığında fırlatılan, kullanıcıya gösterilebilir hata."""
+
+
+IS_TERMUX = bool(os.environ.get("TERMUX_VERSION")) or "com.termux" in (os.environ.get("PREFIX") or "")
+
+_PIN_ERROR_WORDS = ("pin", "şifre", "parola", "hatalı", "yanlış", "incorrect", "wrong", "invalid", "ckr_pin")
+
+# Yerel servislere (CDP 127.0.0.1, ArkSigner localhost) giden istekler sistem/ortam
+# proxy'sine takılmasın (requests + websocket-client NO_PROXY'ye uyar).
+_np = [x for x in (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").split(",") if x.strip()]
+for _h in ("127.0.0.1", "localhost", "::1"):
+    if _h not in _np:
+        _np.append(_h)
+os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(_np)
+
+
+def _host_of(url: str) -> str:
+    m = re.match(r"^[a-z]+://([^/:?#]+)", url or "", re.I)
+    return (m.group(1).lower() if m else "")
+
+
 class UyapBrowserBridge:
-    """Chromium ile CDP üzerinden haberleşen, e-İmza ile otomatik oturum açan köprü."""
+    """Chromium ile CDP üzerinden haberleşen, e-İmza / Mobil İmza ile oturum açan köprü.
+
+    Tarayıcı başlatma, hata ayıklama portu ve sekme bulma işlemlerinin TAMAMI bu sınıfta,
+    tek yerde yapılır (ensure_browser / get_tab / eval_js).
+    """
+
+    UYAP_HOST = "avukat.uyap.gov.tr"
+    EDEVLET_HOST = "giris.turkiye.gov.tr"
+    BLANK_PREFIXES = ("about:blank", "chrome://newtab", "chrome://new-tab-page", "edge://newtab", "chrome-search://")
 
     def __init__(self, port: int = CDP_PORT):
         self.port = port
         self.proc: subprocess.Popen | None = None
         self.is_headless = False
+        self.last_error = ""
+        self._fresh_launch = False
+        self._http = requests.Session()
+        self._http.trust_env = False  # yerel servisler için proxy kullanma
+        self._rejected_pins: set[str] = set()  # sadece SHA-256 özeti, PIN'in kendisi saklanmaz
 
+    # ------------------------------------------------------------------
+    # Tarayıcı bulma / başlatma
+    # ------------------------------------------------------------------
     @staticmethod
     def _find_chrome_bin() -> str | None:
+        env_bin = os.environ.get("UYAP_CHROME_BIN")
+        if env_bin and os.path.isfile(env_bin):
+            return env_bin
+        if sys.platform == "win32":
+            win_candidates = []
+            try:
+                import winreg
+                for exe in ("chrome.exe", "msedge.exe"):
+                    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                        try:
+                            with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}") as k:
+                                win_candidates.append(winreg.QueryValue(k, None))
+                        except OSError:
+                            pass
+            except ImportError:
+                pass
+            pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            lad = os.environ.get("LOCALAPPDATA", "")
+            win_candidates += [
+                os.path.join(pf, r"Google\Chrome\Application\chrome.exe"),
+                os.path.join(pf86, r"Google\Chrome\Application\chrome.exe"),
+                os.path.join(lad, r"Google\Chrome\Application\chrome.exe") if lad else "",
+                shutil.which("chrome.exe"),
+                os.path.join(pf86, r"Microsoft\Edge\Application\msedge.exe"),
+                os.path.join(pf, r"Microsoft\Edge\Application\msedge.exe"),
+                os.path.join(lad, r"Microsoft\Edge\Application\msedge.exe") if lad else "",
+                shutil.which("msedge.exe"),
+            ]
+            for c in win_candidates:
+                c = (c or "").strip('"')
+                if c and os.path.isfile(c):
+                    return c
+            return None
+
+        prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
         candidates = [
             shutil.which("chromium-browser"),
             shutil.which("chromium"),
             shutil.which("google-chrome"),
             shutil.which("google-chrome-stable"),
+            os.path.join(prefix, "bin/chromium-browser"),
+            os.path.join(prefix, "bin/chromium"),
             "/data/data/com.termux/files/usr/bin/chromium-browser",
             "/data/data/com.termux/files/usr/bin/chromium",
             "/usr/lib64/chromium-browser/chromium-browser",
@@ -685,115 +768,319 @@ class UyapBrowserBridge:
                 return c
         return None
 
+    @staticmethod
+    def _detect_display() -> bool:
+        """Grafik ekran var mı? Termux'ta Termux:X11 soketi varsa DISPLAY=:0 ayarlanır."""
+        if sys.platform == "win32":
+            return True
+        if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+            return True
+        if IS_TERMUX:
+            prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+            if os.path.exists(os.path.join(prefix, "tmp/.X11-unix/X0")):
+                os.environ["DISPLAY"] = ":0"
+                return True
+        return False
+
+    def _manual_launch_hint(self) -> str:
+        if sys.platform == "win32":
+            return (f'  chrome.exe --remote-debugging-port={self.port} --user-data-dir="{CHROME_PROFILE_DIR}" {UYAP_BASE_URL}\n'
+                    "  (veya baslat_windows.bat menüsünde 11. seçenek)")
+        if IS_TERMUX:
+            return ("  pkg install x11-repo && pkg install chromium\n"
+                    f"  chromium-browser --no-sandbox --remote-debugging-port={self.port} {UYAP_BASE_URL}")
+        return f"  chromium --remote-debugging-port={self.port} {UYAP_BASE_URL}"
+
     def launch_or_connect(self, headless: bool = False) -> tuple[bool, str]:
-        """Chromium açık değilse başlatır (opsiyonel headless), açıksa UYAP sekmesine bağlanır."""
-        self.is_headless = headless
+        """Geriye dönük uyumluluk: ensure_browser ile aynı."""
+        return self.ensure_browser(headless=headless)
+
+    def ensure_browser(self, headless: bool | None = None, wait_s: float | None = None) -> tuple[bool, str]:
+        """CDP portu açıksa bağlanır; değilse platforma uygun tarayıcıyı başlatır ve port
+        açılana kadar artan aralıklarla bekler. Hiçbir zaman istisna fırlatmaz."""
+        if headless is not None:
+            self.is_headless = headless
         if self._is_port_open():
-            return True, f"Mevcut Chromium oturumuna bağlanıldı (Port {self.port})."
+            return True, f"Mevcut tarayıcı oturumuna bağlanıldı (Port {self.port})."
 
         chrome_bin = self._find_chrome_bin()
         if not chrome_bin:
-            return False, "Sistemde Chromium veya Google Chrome bulunamadı. Lütfen kurun (pkg install chromium veya sudo dnf install chromium)."
+            if sys.platform == "win32":
+                msg = "Google Chrome veya Microsoft Edge bulunamadı. Lütfen Chrome kurun."
+            elif IS_TERMUX:
+                msg = "Chromium bulunamadı. Termux'ta kurun: pkg install x11-repo && pkg install chromium"
+            else:
+                msg = "Chromium / Chrome bulunamadı. Lütfen kurun (örn. sudo dnf install chromium)."
+            self.last_error = msg
+            return False, msg
 
-        CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.last_error = f"Tarayıcı profil klasörü oluşturulamadı ({CHROME_PROFILE_DIR}): {e}"
+            return False, self.last_error
+
         cmd = [
             chrome_bin,
             f"--remote-debugging-port={self.port}",
+            "--remote-debugging-address=127.0.0.1",
             "--remote-allow-origins=*",
             f"--user-data-dir={CHROME_PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
         ]
-        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-        if headless or not has_display:
+        has_display = self._detect_display()
+        if self.is_headless or not has_display:
             self.is_headless = True
-            cmd.extend([
-                "--headless=new",
-                "--disable-gpu",
-                "--no-sandbox",
-            ])
+            cmd += ["--headless=new", "--disable-gpu", "--window-size=1366,900"]
+        if IS_TERMUX or (sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0):
+            # Termux/Android'de Chromium sandbox'ı çalışmaz; /dev/shm yoktur.
+            cmd += ["--no-sandbox", "--disable-dev-shm-usage"]
+            if "--disable-gpu" not in cmd:
+                cmd.append("--disable-gpu")
         cmd.append(UYAP_BASE_URL)
+
         try:
-            self.proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            if sys.platform == "win32":
+                flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+                self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+            else:
+                self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL, start_new_session=True)
         except Exception as e:
-            return False, f"Chromium başlatılamadı: {e}"
+            self.last_error = f"Tarayıcı başlatılamadı ({os.path.basename(chrome_bin)}): {e}"
+            return False, self.last_error
 
-        for _ in range(30):
-            time.sleep(0.4)
+        if wait_s is None:
+            wait_s = 60.0 if IS_TERMUX else 25.0
+        deadline = time.time() + wait_s
+        delay = 0.25
+        while time.time() < deadline:
+            time.sleep(delay)
+            delay = min(delay * 1.5, 2.0)
             if self._is_port_open():
+                self._fresh_launch = True
                 mode_str = "Headless / Arka Plan" if self.is_headless else "Pencereli"
-                return True, f"Chromium başlatıldı ({mode_str}). UYAP Portal sekmesi hazır."
+                name = "Edge" if "msedge" in chrome_bin.lower() else ("Chrome" if "chrome" in chrome_bin.lower() else "Chromium")
+                return True, f"{name} başlatıldı ({mode_str}, Port {self.port})."
+            rc = self.proc.poll()
+            if rc is not None and time.time() > deadline - wait_s + 3:
+                # Süreç hemen çıktı: aynı profille portsuz açık bir pencere var ya da tarayıcı çöktü.
+                break
 
-        return False, "Chromium başlatıldı ancak hata ayıklama portuna (9223) ulaşılamadı."
+        rc = self.proc.poll() if self.proc else None
+        if rc is not None:
+            msg = (f"Tarayıcı açıldı ama hata ayıklama portu ({self.port}) açılmadı (çıkış kodu {rc}). "
+                   f"Büyük olasılıkla aynı UYAP profiliyle ({CHROME_PROFILE_DIR.name}) portsuz açılmış bir "
+                   "pencere zaten açık. O pencereyi tamamen kapatıp tekrar deneyin.")
+        else:
+            msg = (f"Tarayıcı başlatıldı ancak {int(wait_s)} sn içinde hata ayıklama portuna ({self.port}) "
+                   "ulaşılamadı. Port başka bir program tarafından kullanılıyor olabilir.")
+        self.last_error = msg
+        return False, msg
+
+    # ------------------------------------------------------------------
+    # CDP yardımcıları
+    # ------------------------------------------------------------------
+    def _cdp_http(self, path: str, method: str = "GET", timeout: float = 2.5):
+        """CDP HTTP uç noktası; bağlantı yoksa None döner (istisna fırlatmaz)."""
+        url = f"http://127.0.0.1:{self.port}{path}"
+        try:
+            r = self._http.request(method, url, timeout=timeout)
+            if r.status_code != 200:
+                return None
+            return r.json()
+        except Exception:
+            return None
 
     def _is_port_open(self) -> bool:
+        info = self._cdp_http("/json/version", timeout=1.5)
+        return bool(info and (info.get("Browser") or info.get("webSocketDebuggerUrl")))
+
+    def is_browser_alive(self) -> bool:
+        return self._is_port_open()
+
+    def _list_pages(self) -> list | None:
+        tabs = self._cdp_http("/json/list")
+        if tabs is None:
+            return None
+        return [t for t in tabs if t.get("type") == "page"]
+
+    @staticmethod
+    def _ws_url(tab: dict) -> str:
+        ws = tab.get("webSocketDebuggerUrl") or ""
+        # 'localhost' bazı Windows makinelerde ::1'e çözülüp bağlantıyı reddeder
+        return ws.replace("ws://localhost:", "ws://127.0.0.1:")
+
+    def _pick(self, pages: list, target: str) -> dict | None:
+        def host_is(t, h):
+            return _host_of(t.get("url") or "") == h
+        uyap = [t for t in pages if host_is(t, self.UYAP_HOST)]
+        edev = [t for t in pages if host_is(t, self.EDEVLET_HOST)]
+        if target == "edevlet":
+            return edev[0] if edev else None
+        if target == "auto":
+            # Mobil İmza akışı: e-Devlet sekmesi varsa o, yoksa UYAP sekmesi
+            return (edev or uyap or [None])[0]
+        # target == "uyap": API çağrıları için UYAP origin'li sekme şart
+        # (giris sayfası değil, uygulama sayfası tercih edilir)
+        uyap.sort(key=lambda t: "/giris" in (t.get("url") or ""))
+        return uyap[0] if uyap else None
+
+    def _open_uyap_tab(self, pages: list) -> dict | None:
+        """UYAP sekmesi yoksa boş bir sekmeyi UYAP'a yönlendirir ya da yeni sekme açar."""
+        blank = next((t for t in pages if (t.get("url") or "").startswith(self.BLANK_PREFIXES)
+                      and t.get("webSocketDebuggerUrl")), None)
+        if blank:
+            try:
+                self._ws_call(self._ws_url(blank), "Page.navigate", {"url": UYAP_BASE_URL}, timeout=10)
+            except Exception:
+                blank = None
+        if not blank:
+            from urllib.parse import quote
+            # Yeni Chrome sürümleri /json/new için PUT ister; eskileri GET
+            if self._cdp_http(f"/json/new?{quote(UYAP_BASE_URL, safe=':/')}", method="PUT") is None:
+                self._cdp_http(f"/json/new?{quote(UYAP_BASE_URL, safe=':/')}", method="GET")
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(0.5)
+            pages = self._list_pages() or []
+            tab = self._pick(pages, "uyap")
+            if tab and tab.get("webSocketDebuggerUrl"):
+                return tab
+        return None
+
+    def get_tab(self, target: str = "uyap", create: bool = True, relaunch: bool = True) -> dict:
+        """İstenen sekmeyi döndürür. Tarayıcı kapalıysa (relaunch) yeniden başlatır,
+        UYAP sekmesi yoksa (create) açar. Bulunamazsa UyapBrowserError fırlatır."""
+        pages = self._list_pages()
+        if pages is None:
+            if not relaunch:
+                raise UyapBrowserError(f"Tarayıcıya bağlanılamadı (Port {self.port} kapalı).")
+            print(f"[!] Tarayıcı (Port {self.port}) kapalı veya kapanmış; yeniden başlatılıyor...")
+            ok, msg = self.ensure_browser()
+            if not ok:
+                raise UyapBrowserError(msg + "\n" + self._manual_launch_hint())
+            print(f"[*] {msg} Not: Yeni açılan tarayıcıda UYAP oturumu yeniden açılmalıdır.")
+            pages = self._list_pages() or []
+            if not pages:
+                time.sleep(1.5)
+                pages = self._list_pages() or []
+
+        tab = self._pick(pages, target)
+        was_fresh = self._fresh_launch
+        if tab is None and target in ("uyap", "auto") and self._fresh_launch:
+            # Yeni başlatılan tarayıcının ilk sekmesi henüz UYAP adresine geçmemiş olabilir
+            deadline = time.time() + 20
+            while tab is None and time.time() < deadline:
+                time.sleep(0.5)
+                pages = self._list_pages() or []
+                tab = self._pick(pages, target)
+        self._fresh_launch = False
+        if tab and not tab.get("webSocketDebuggerUrl"):
+            raise UyapBrowserError("UYAP sekmesine başka bir araç (örn. açık DevTools penceresi) bağlı. "
+                                   "Sekmedeki Geliştirici Araçları'nı kapatıp tekrar deneyin.")
+        if tab:
+            if was_fresh:
+                self._wait_tab_host(tab)
+            return tab
+        if create and target in ("uyap", "auto"):
+            tab = self._open_uyap_tab(pages)
+            if tab:
+                self._wait_tab_host(tab)
+                return tab
+            raise UyapBrowserError("UYAP sekmesi açılamadı. İnternet bağlantınızı kontrol edin.")
+        raise UyapBrowserError("Açık bir UYAP sekmesi bulunamadı.")
+
+    def _wait_tab_host(self, tab: dict, timeout: float = 25.0) -> bool:
+        """Sekmedeki belge gerçekten UYAP/e-Devlet adresine yüklenene kadar bekler."""
+        want = _host_of(tab.get("url") or "") or self.UYAP_HOST
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                res = self._ws_call(self._ws_url(tab), "Runtime.evaluate", {
+                    "expression": "location.hostname + '|' + document.readyState",
+                    "returnByValue": True,
+                }, timeout=5)
+                val = str(res.get("result", {}).get("value") or "")
+                host, _, state = val.partition("|")
+                if host == want and state in ("interactive", "complete"):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
+    def get_uyap_tab(self, target: str = "auto") -> dict | None:
+        """Geriye dönük uyumluluk: istisna fırlatmadan sekme döndürür."""
         try:
-            r = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.5)
-            return r.status_code == 200
+            return self.get_tab(target=target, create=False, relaunch=False)
+        except Exception:
+            return None
+
+    def ensure_ready(self, target: str = "uyap") -> tuple[bool, str]:
+        """Tarayıcı + UYAP sekmesi hazır mı? (gerekirse başlatır / açar)"""
+        try:
+            self.get_tab(target=target, create=True, relaunch=True)
+            return True, "Tarayıcı ve UYAP sekmesi hazır."
+        except UyapBrowserError as e:
+            return False, str(e)
+        except Exception as e:
+            return False, f"Tarayıcı hazırlanamadı: {e}"
+
+    @staticmethod
+    def _ws_call(ws_url: str, method: str, params: dict, timeout: float = 30.0):
+        ws = websocket.create_connection(ws_url, timeout=timeout, suppress_origin=True)
+        try:
+            msg_id = random.randint(1000, 999999)
+            ws.send(json.dumps({"id": msg_id, "method": method, "params": params}))
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                resp = json.loads(ws.recv())
+                if resp.get("id") == msg_id:
+                    if "error" in resp:
+                        raise RuntimeError(f"CDP Hatası: {resp['error'].get('message', resp['error'])}")
+                    return resp.get("result", {})
+            raise TimeoutError(f"CDP yanıtı {timeout} sn içinde gelmedi ({method}).")
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def navigate(self, url: str, target: str = "uyap") -> bool:
+        try:
+            tab = self.get_tab(target=target, create=True)
+            self._ws_call(self._ws_url(tab), "Page.navigate", {"url": url}, timeout=15)
+            return True
         except Exception:
             return False
 
-    def get_uyap_tab(self) -> dict | None:
-        """Açık sekmeler arasından avukat.uyap.gov.tr veya e-Devlet giriş sekmesini döndürür."""
-        try:
-            tabs = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=2.5).json()
-        except Exception:
-            return None
-        pages = [t for t in tabs if t.get("type") == "page"]
-        # Eğer aktif sekme e-Devlet Mobil İmza ise önce onu döndür
-        for t in pages:
-            url = t.get("url") or ""
-            if "giris.turkiye.gov.tr" in url:
-                return t
-        # UYAP portal sekmesi
-        for t in pages:
-            url = t.get("url") or ""
-            if "uyap.gov.tr" in url:
-                return t
-        return pages[0] if pages else None
-
-    def eval_js(self, js_expression: str, timeout: float = 90.0, retries: int = 2):
-        """Tarayıcıdaki UYAP sekmesinde asenkron JS çalıştırır ve sonucunu döndürür."""
-        last_err = None
+    def eval_js(self, js_expression: str, timeout: float = 90.0, retries: int = 2, target: str = "uyap"):
+        """Tarayıcı sekmesinde (varsayılan: UYAP origin'li sekme) asenkron JS çalıştırır.
+        Tarayıcı kapanmışsa yeniden başlatır, UYAP sekmesi yoksa açar."""
+        last_err: Exception | None = None
         for attempt in range(retries + 1):
-            tab = self.get_uyap_tab()
-            if not tab or not tab.get("webSocketDebuggerUrl"):
-                if attempt < retries:
-                    time.sleep(1.0)
-                    continue
-                raise RuntimeError("Açık bir UYAP tarayıcı sekmesi bulunamadı. Önce Chromium'u başlatın.")
-
-            ws_url = tab["webSocketDebuggerUrl"]
-            ws = None
             try:
-                ws = websocket.create_connection(ws_url, timeout=timeout)
-                msg_id = random.randint(1000, 999999)
-                payload = {
-                    "id": msg_id,
-                    "method": "Runtime.evaluate",
-                    "params": {
-                        "expression": js_expression,
-                        "awaitPromise": True,
-                        "returnByValue": True,
-                    },
-                }
-                ws.send(json.dumps(payload))
-                while True:
-                    raw = ws.recv()
-                    resp = json.loads(raw)
-                    if resp.get("id") == msg_id:
-                        if "error" in resp:
-                            raise RuntimeError(f"CDP Hatası: {resp['error']}")
-                        res = resp.get("result", {})
-                        if "exceptionDetails" in res:
-                            exc = res["exceptionDetails"]
-                            raise RuntimeError(f"JS Hatası: {exc.get('text')} {exc.get('exception', {}).get('description', '')}")
-                        return res.get("result", {}).get("value")
+                tab = self.get_tab(target=target, create=True, relaunch=True)
+            except UyapBrowserError as e:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(1.0 + attempt)
+                    continue
+                raise
+            try:
+                res = self._ws_call(self._ws_url(tab), "Runtime.evaluate", {
+                    "expression": js_expression,
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                }, timeout=timeout)
+                if "exceptionDetails" in res:
+                    exc = res["exceptionDetails"]
+                    raise RuntimeError(f"JS Hatası: {exc.get('text')} {exc.get('exception', {}).get('description', '')}")
+                return res.get("result", {}).get("value")
             except (websocket.WebSocketTimeoutException, TimeoutError) as e:
                 last_err = e
                 if attempt < retries:
@@ -806,131 +1093,156 @@ class UyapBrowserBridge:
                     time.sleep(1.5)
                     continue
                 raise
-            finally:
-                if ws:
-                    try:
-                        ws.close()
-                    except Exception:
-                        pass
         if last_err:
             raise last_err
 
+    # ------------------------------------------------------------------
+    # e-İmza (Adalet e-İmza Client / ArkSigner, localhost:5975)
+    # ------------------------------------------------------------------
+    def check_arksigner(self) -> tuple[bool, str]:
+        try:
+            r = self._http.get(f"{ARKSIGNER_URL}/api/v1/signature/getCertificates", timeout=6)
+        except requests.exceptions.RequestException:
+            if IS_TERMUX:
+                return False, "e-İmza (ArkSigner) Android/Termux'ta çalışmaz. Termux'ta Mobil İmza kullanın."
+            return False, ("Adalet e-İmza Client (ArkSigner) çalışmıyor: localhost:5975'e bağlanılamadı. "
+                           "Uygulamayı başlatıp e-İmza kartını takın.")
+        if r.status_code != 200:
+            return False, f"ArkSigner yanıt vermedi (HTTP {r.status_code})."
+        return True, "ArkSigner hazır."
+
     def auto_relogin(self, pin: str = DEFAULT_E_IMZA_PIN) -> tuple[bool, str]:
         """
-        ArkSigner (http://localhost:5975) üzerinden kullanıcının PIN koduyla
-        e-İmza doğrulaması yapar ve Chromium UYAP sekmesinde oturumu kesintisiz yeniler.
+        ArkSigner (http://localhost:5975) üzerinden PIN ile challenge imzalatır ve tarayıcıdaki
+        UYAP sekmesinde (UYAP'ın kendi akışıyla aynı: web1.uyap -> login.uyap ->
+        kullanici_bilgileri.uyap) oturumu açar; sonunda oturumun gerçekten açıldığını doğrular.
+        PIN hiçbir yere yazılmaz/loglanmaz.
         """
+        pin = str(pin or "").strip()
+        if not pin:
+            return False, "e-İmza PIN kodu girilmedi."
+        pin_hash = hashlib.sha256(pin.encode("utf-8")).hexdigest()
+        if pin_hash in self._rejected_pins:
+            return False, ("Bu PIN bu çalıştırmada kart tarafından zaten reddedildi. Kartın bloke olmaması için "
+                           "aynı PIN tekrar denenmedi; doğru PIN ile yeniden deneyin.")
         try:
-            # 1. ArkSigner sertifika sorgusu
-            r_cert = requests.get(f"{ARKSIGNER_URL}/api/v1/signature/getCertificates", timeout=6)
-            if r_cert.status_code != 200:
-                return False, f"ArkSigner servisine bağlanılamadı (HTTP {r_cert.status_code}). ArkSigner çalışıyor mu?"
+            # 1. Önce tarayıcı + UYAP sekmesi hazır olsun (PIN boşa harcanmasın)
+            ok, msg = self.ensure_ready("uyap")
+            if not ok:
+                return False, msg
 
-            cards = r_cert.json().get("data", [])
+            # 2. Sertifika
+            ok, msg = self.check_arksigner()
+            if not ok:
+                return False, msg
+            r_cert = self._http.get(f"{ARKSIGNER_URL}/api/v1/signature/getCertificates", timeout=8)
+            cards = (r_cert.json() or {}).get("data") or []
             if not cards:
-                return False, "ArkSigner'a bağlı e-İmza kart okuyucu bulunamadı. Lütfen e-İmzanızı takın."
-
-            card = cards[0]
-            certs = card.get("certificates", [])
+                return False, "ArkSigner'a bağlı e-İmza kartı bulunamadı. Kartı takıp tekrar deneyin."
+            certs = []
+            for card in cards:
+                if card.get("ready") is False:
+                    continue
+                certs.extend(card.get("certificates") or [])
             if not certs:
-                return False, "Akıllı kart üzerinde geçerli sertifika bulunamadı."
+                return False, "e-İmza kartında sertifika bulunamadı (kart hazır değil veya okunamadı)."
+            valid = [c for c in certs if c.get("valid", True)]
+            if not valid:
+                return False, "e-İmza sertifikanızın geçerlilik süresi uygun değil (süresi dolmuş olabilir)."
+            valid.sort(key=lambda c: not c.get("default", False))
+            cert = valid[0]
 
-            cert = certs[0]
-            cert_id = cert.get("certificateId")
-            subject = cert.get("subject", "Avukat")
-
-            # 2. Challenge imzalat
-            sign_payload = {
-                "certificateId": cert_id,
-                "password": str(pin).strip(),
-                "content": SIGN_CHALLENGE
-            }
-            r_sign = requests.post(f"{ARKSIGNER_URL}/api/v1/signature/sign", json=sign_payload, timeout=12)
-            if r_sign.status_code != 200:
-                return False, f"ArkSigner imzalama isteği reddedildi (HTTP {r_sign.status_code})"
-
-            s_data = r_sign.json()
-            if s_data.get("metadata", {}).get("STATUS") != "SUCCESS":
-                msg = s_data.get("metadata", {}).get("MESSAGE") or "PIN kodu hatalı veya kart meşgul"
-                return False, f"e-İmza PIN Hatası: {msg}"
-
-            sig_res = s_data.get("data", {})
-            sig = sig_res.get("signedData")
-            tx_id = sig_res.get("txId")
+            # 3. Challenge imzalat (UYAP'ın kullandığı sabit içerik)
+            try:
+                r_sign = self._http.post(f"{ARKSIGNER_URL}/api/v1/signature/sign", json={
+                    "certificateId": cert.get("certificateId"),
+                    "password": pin,
+                    "content": SIGN_CHALLENGE,
+                }, timeout=45)
+            except requests.exceptions.Timeout:
+                return False, "ArkSigner imzalama isteği zaman aşımına uğradı. Kartı çıkarıp takıp tekrar deneyin."
+            except requests.exceptions.RequestException:
+                return False, "ArkSigner'a imza isteği gönderilemedi (servis kapandı mı?)."
+            try:
+                s_data = r_sign.json() or {}
+            except ValueError:
+                s_data = {}
+            meta = s_data.get("metadata") or {}
+            if r_sign.status_code != 200 or meta.get("STATUS") != "SUCCESS":
+                emsg = meta.get("MESSAGE") or f"HTTP {r_sign.status_code}"
+                if any(w in tr_lower(emsg) for w in _PIN_ERROR_WORDS):
+                    self._rejected_pins.add(pin_hash)
+                    return False, f"e-İmza PIN hatası: {emsg} (Dikkat: art arda hatalı PIN kartı bloke eder.)"
+                return False, f"e-İmza imzalama hatası: {emsg}"
+            sig_res = s_data.get("data") if isinstance(s_data.get("data"), dict) else s_data
+            sig, tx_id = sig_res.get("signedData"), sig_res.get("txId")
             if not sig or not tx_id:
                 return False, "ArkSigner imza veya işlem numarası (txId) üretemedi."
 
-            # 3. Chromium UYAP sekmesine kimlik doğrulama isteği gönder
+            # 4. UYAP sekmesinde giriş
             js_login = f"""
             (async () => {{
                 try {{
                     const sig = {json.dumps(sig)};
                     const txId = {json.dumps(tx_id)};
-
-                    // 1. web1.uyap
                     const r1 = await fetch("/web1.uyap?signature=" + encodeURIComponent(sig) + "&txId=" + encodeURIComponent(txId), {{
-                        method: "GET",
-                        headers: {{"Cache-Control": "no-cache"}}
+                        method: "GET", headers: {{"Cache-Control": "no-cache"}}, credentials: "include"
                     }});
                     const d1 = await r1.json().catch(() => null);
                     if (!d1 || !d1.success) {{
-                        return {{success: false, step: "web1.uyap", detail: d1}};
+                        return {{success: false, step: "web1.uyap", status: r1.status,
+                                 message: d1 && (d1.message || d1.errorMessage || (d1.error && d1.error.message)) || null}};
                     }}
-
-                    // 2. login.uyap
                     const r2 = await fetch("/login.uyap", {{
-                        method: "POST",
+                        method: "POST", credentials: "include",
                         headers: {{"Content-Type": "application/json", "Cache-Control": "no-cache"}},
                         body: JSON.stringify({{}})
                     }});
-                    if (!r2.ok) {{
-                        return {{success: false, step: "login.uyap", status: r2.status}};
-                    }}
-
-                    // 3. kullanici_bilgileri.uyap
+                    if (!r2.ok) return {{success: false, step: "login.uyap", status: r2.status}};
                     const r3 = await fetch("/kullanici_bilgileri.uyap", {{
-                        method: "POST",
+                        method: "POST", credentials: "include",
                         headers: {{"Content-Type": "application/json", "Cache-Control": "no-cache"}},
                         body: JSON.stringify({{}})
                     }});
                     const uinfo = await r3.json().catch(() => null);
-
+                    if (!uinfo || !(uinfo.tcKimlikNo || uinfo.tckn)) {{
+                        return {{success: false, step: "kullanici_bilgileri.uyap", status: r3.status}};
+                    }}
                     localStorage.setItem("loginState", "true");
                     sessionStorage.setItem("showKvkPopup", "true");
                     sessionStorage.setItem("showPopupDuyuru2", "true");
-                    if (uinfo) {{
-                        sessionStorage.setItem("kullanici", JSON.stringify(uinfo));
-                    }}
-
-                    return {{
-                        success: true,
-                        user: uinfo
-                    }};
+                    sessionStorage.setItem("kullanici", JSON.stringify(uinfo));
+                    return {{success: true, user: uinfo}};
                 }} catch(e) {{
                     return {{success: false, error: e.toString()}};
                 }}
             }})()
             """
-            res = self.eval_js(js_login, timeout=25.0)
-            if res and res.get("success"):
-                u = res.get("user") or {}
-                full_name = f"{u.get('adi', '')} {u.get('soyadi', '')}".strip() or subject
-                return True, f"e-İmza ile oturum yenilendi ({full_name})"
-            else:
-                return False, f"Tarayıcıda oturum yenilenemedi: {res}"
+            res = self.eval_js(js_login, timeout=30.0, retries=0, target="uyap")
+            if not (res and res.get("success")):
+                res = res or {}
+                detail = res.get("message") or res.get("error") or f"adım: {res.get('step')}, HTTP {res.get('status')}"
+                return False, f"UYAP e-İmza girişini kabul etmedi ({detail})."
+
+            # 5. Kesin doğrulama + sayfayı oturum açık haliyle yenile
+            if not self.is_logged_in():
+                return False, "e-İmza imzası alındı ama UYAP oturumu doğrulanamadı. Tekrar deneyin."
+            self.navigate(UYAP_BASE_URL + "/", target="uyap")
+            u = res.get("user") or {}
+            full_name = f"{u.get('adi', '')} {u.get('soyadi', '')}".strip() or "Avukat"
+            return True, f"e-İmza ile oturum açıldı ({full_name})"
+        except KeyboardInterrupt:
+            return False, "e-İmza girişi iptal edildi."
         except Exception as e:
             return False, f"Otomatik e-İmza giriş hatası: {e}"
 
     def is_logged_in(self) -> bool:
-        """
-        Tarayıcının gerçekten aktif, kimlik doğrulaması yapılmış bir UYAP oturumunda
-        olup olmadığını /kullanici_bilgileri.uyap ile kesin olarak doğrular.
-        """
+        """/kullanici_bilgileri.uyap ile aktif UYAP oturumunu kesin olarak doğrular."""
         js = """
         (async () => {
             try {
                 const r = await fetch("/kullanici_bilgileri.uyap", {
-                    method: "POST",
+                    method: "POST", credentials: "include",
                     headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
                     body: "{}"
                 });
@@ -944,19 +1256,20 @@ class UyapBrowserBridge:
         })()
         """
         try:
-            return bool(self.eval_js(js, timeout=10.0))
+            return bool(self.eval_js(js, timeout=12.0, retries=1, target="uyap"))
         except Exception:
             return False
 
     def check_login_and_user(self) -> dict:
-        """Kullanıcının UYAP'a giriş yapıp yapmadığını ve TCKN/Ad/Soyad bilgisini kontrol eder."""
+        """UYAP oturumu açık mı, TCKN/Ad/Soyad nedir? Hata olursa {} döner, 'error' anahtarına
+        anlaşılır neden yazılır (tarayıcı yok vb.)."""
         js = """
         (async () => {
             const url = window.location.href;
             let user = null;
             try {
                 const r = await fetch("/kullanici_bilgileri.uyap", {
-                    method: "POST",
+                    method: "POST", credentials: "include",
                     headers: {"Content-Type": "application/json", "Cache-Control": "no-cache"},
                     body: "{}"
                 });
@@ -976,32 +1289,84 @@ class UyapBrowserBridge:
             } catch (e) {
                 user = null;
             }
-            const loginState = user ? "true" : "false";
-            return {
-                url,
-                loginState,
-                user,
-                title: document.title
-            };
+            return {url, loginState: user ? "true" : "false", user, title: document.title};
         })()
         """
-        return self.eval_js(js, timeout=15.0) or {}
+        try:
+            return self.eval_js(js, timeout=15.0, retries=1, target="uyap") or {}
+        except UyapBrowserError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"Oturum kontrol edilemedi: {e}"}
+
+    # ------------------------------------------------------------------
+    # Mobil İmza (e-Devlet)
+    # ------------------------------------------------------------------
+    _JS_MOBIL_STATE = r"""
+    (() => {
+        const url = location.href;
+        const host = location.hostname;
+        const text = (document.body && document.body.innerText) || "";
+        const vis = e => !!(e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length));
+        const btnText = b => (b.innerText || b.value || b.getAttribute('title') || '').trim();
+        const buttons = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn')).filter(vis);
+        const errEl = Array.from(document.querySelectorAll('.fieldError, .formErrors, .errorMessage, .alert-danger, .error-message'))
+            .find(e => vis(e) && (e.innerText || '').trim().length > 3);
+        let fp = "";
+        const m = text.match(/Parmak\s*[İI]zi\s*[:\-]?\s*([A-F0-9]{2,4}(?:[\s\-]+[A-F0-9]{2,4})+)/i) ||
+                  text.match(/\b([A-F0-9]{4}(?:\s+[A-F0-9]{4}){3,})\b/);
+        if (m) fp = m[1].trim();
+        let page = "other";
+        if (host === "avukat.uyap.gov.tr") {
+            page = url.includes("/giris") ? "uyap_giris" : "uyap_app";
+        } else if (host === "giris.turkiye.gov.tr") {
+            if (document.getElementById('tridField') && document.getElementById('gsmField')) page = "mobil_form";
+            else if (buttons.some(b => /İmzala/.test(btnText(b)))) page = "taahhut";
+            else if (fp || /bekleniyor|operat[öo]r/i.test(text)) page = "waiting";
+            else if (buttons.some(b => /^(Onayla|İzin Ver|Devam)/.test(btnText(b)))) page = "oauth";
+            else if (!url.includes("Mobil-Imza")) page = "edevlet_other";
+        }
+        return {url, page, fp, ready: document.readyState, error: errEl ? errEl.innerText.trim().slice(0, 300) : ""};
+    })()
+    """
+
+    _JS_MOBIL_SELECT = r"""
+    (() => {
+        const dd = document.querySelector(".edevlet-dropdown");
+        if (!dd) return "no_dropdown";
+        const reactKey = Object.keys(dd).find(k => k.startsWith("__reactFiber"));
+        let curr = reactKey ? dd[reactKey] : null;
+        while (curr) {
+            const p = curr.memoizedProps;
+            if (p && p.onItemClick && Array.isArray(p.items)) {
+                const it = p.items.find(i => (i.name || "").includes("Mobil"));
+                if (it) { p.onItemClick({itemData: it, itemIndex: p.items.indexOf(it)}); return "invoked"; }
+            }
+            curr = curr.return;
+        }
+        const item = Array.from(document.querySelectorAll('.dx-list-item, [role="option"]'))
+            .find(e => (e.innerText || '').trim().startsWith('Mobil İmza') && e.getBoundingClientRect().width > 0);
+        if (item) { item.click(); return "clicked"; }
+        const btn = dd.querySelector('.dx-dropdownbutton-action') || dd;
+        btn.click();
+        return "opened_dropdown";
+    })()
+    """
 
     def login_with_mobil_imza(
         self,
         tc: str,
         gsm: str,
         operator: str = "turktelekom",
-        status_cb=None
+        status_cb=None,
+        timeout_s: float = 240.0,
     ) -> tuple[bool, str]:
         """
-        e-Devlet Mobil İmza ile UYAP Avukat Portal oturumunu otomatik başlatır.
-        1. avukat.uyap.gov.tr/giris üzerinden Mobil İmza sayfasına yönlendirir.
-        2. TC, GSM ve Operatör bilgilerini doldurup gönderir.
-        3. Taahhütnameyi onaylar (İmzala).
-        4. Parmak izini alır ve kullanıcının SIM onayını bekler.
-        5. e-Devlet OAuth 'Onayla' ekranını otomatik onaylar.
-        6. UYAP oturumunun başarıyla açıldığını doğrular.
+        e-Devlet Mobil İmza ile UYAP Avukat Portal oturumu açar. Sayfa durumuna göre çalışan
+        bir durum makinesidir (sabit beklemeler yerine): UYAP giriş -> e-Devlet Mobil İmza formu
+        -> (Taahhütname / İmzala) -> telefonda onay bekleme -> (OAuth Onayla) -> UYAP.
+        Sonunda /kullanici_bilgileri.uyap ile oturumun gerçekten açıldığı doğrulanır.
+        Ctrl+C ile iptal edilebilir (istisna fırlatmaz).
         """
         def log_msg(m):
             if status_cb:
@@ -1009,291 +1374,173 @@ class UyapBrowserBridge:
             else:
                 print(m)
 
-        # Aktif oturum var mı kontrol et (kesin kontrol: /giris sayfasında değil ve API yanıt veriyor)
-        if self.is_logged_in():
-            uinfo = self.check_login_and_user()
-            usr = uinfo.get("user") or {}
-            name = f"{usr.get('ad', '') or usr.get('adi', '')} {usr.get('soyad', '') or usr.get('soyadi', '')}".strip()
-            return True, f"Zaten aktif UYAP oturumu mevcut: {name} ({usr.get('tcKimlikNo')})"
+        try:
+            ok, msg = self.ensure_ready("auto")
+            if not ok:
+                return False, msg
 
-        tc = str(tc).strip()
-        gsm_digits = re.sub(r"\D", "", str(gsm))
-        if gsm_digits.startswith("90") and len(gsm_digits) == 12:
-            gsm_digits = gsm_digits[2:]
-        elif gsm_digits.startswith("0") and len(gsm_digits) == 11:
-            gsm_digits = gsm_digits[1:]
-
-        op_map = {
-            "1": "turkcell",
-            "turkcell": "turkcell",
-            "2": "turktelekom",
-            "turktelekom": "turktelekom",
-            "avea": "turktelekom",
-            "tt": "turktelekom",
-            "3": "vodafone",
-            "vodafone": "vodafone"
-        }
-        op_id = op_map.get(str(operator).lower().strip(), "")
-        if not op_id:
-            if gsm_digits.startswith(("551", "552", "553", "554", "555", "559", "501", "505", "506", "507")):
-                op_id = "turktelekom"
-            elif gsm_digits.startswith(("541", "542", "543", "544", "545", "546", "547", "548", "549")):
-                op_id = "vodafone"
-            else:
-                op_id = "turkcell"
-
-        log_msg("[*] UYAP Mobil İmza sayfasına yönlendiriliyor...")
-
-        # Adım 1: Mobil İmza giriş sayfasına geç
-        js_nav = """
-        (() => {
-            const href = window.location.href;
-            if (href.includes("giris.turkiye.gov.tr/Giris/Mobil-Imza")) {
-                return "already_on_mobil_imza";
-            }
-            if (!href.includes("avukat.uyap.gov.tr/giris") && !href.includes("avukat.uyap.gov.tr")) {
-                window.location.href = "https://avukat.uyap.gov.tr/giris";
-                return "navigating_to_uyap_giris";
-            }
-
-            // Yöntem 1: DevExtreme React DropDownButton onItemClick doğrudan tetikleme (anında & %100 kararlı)
-            const dd = document.querySelector(".edevlet-dropdown");
-            if (dd) {
-                const reactKey = Object.keys(dd).find(k => k.startsWith("__reactFiber"));
-                if (reactKey && dd[reactKey]) {
-                    let curr = dd[reactKey];
-                    while (curr) {
-                        if (curr.memoizedProps && curr.memoizedProps.onItemClick && curr.memoizedProps.items) {
-                            const mobilItem = curr.memoizedProps.items.find(it => it.name && it.name.includes("Mobil"));
-                            if (mobilItem) {
-                                curr.memoizedProps.onItemClick({ itemData: mobilItem, itemIndex: 0 });
-                                return "invoked_react_mobil_imza";
-                            }
-                        }
-                        curr = curr.return;
-                    }
-                }
-
-                // Yöntem 2: DOM üzerinde görünür liste elemanı varsa tıkla
-                const items = Array.from(document.querySelectorAll('.dx-list-item, [role="option"]'));
-                const item = items.find(e => {
-                    const t = (e.innerText || e.getAttribute('title') || '').trim();
-                    return (t === 'Mobil İmza İle Giriş' || t.startsWith('Mobil İmza')) && e.getBoundingClientRect().width > 0;
-                });
-                if (item) {
-                    item.click();
-                    item.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                    item.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                    item.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                    return "clicked_mobil_imza";
-                }
-
-                // Yöntem 3: Dropdown butonunu açmayı dene
-                const btn = dd.querySelector('.dx-dropdownbutton-action') || dd;
-                btn.click();
-                btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                btn.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                return "opened_dropdown";
-            }
-            return "waiting_dropdown";
-        })()
-        """
-        for _ in range(25):
-            try:
-                res = self.eval_js(js_nav, timeout=6.0)
-                if res == "already_on_mobil_imza":
-                    break
-                elif res in ("invoked_react_mobil_imza", "clicked_mobil_imza"):
-                    time.sleep(1.0)
-                    for _ in range(15):
-                        t_tab = self.get_uyap_tab()
-                        cur_url = (t_tab.get("url") or "") if t_tab else ""
-                        if "giris.turkiye.gov.tr/Giris/Mobil-Imza" in cur_url:
-                            break
-                        try:
-                            if self.eval_js("window.location.href.includes('giris.turkiye.gov.tr/Giris/Mobil-Imza')", timeout=3.0):
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(0.5)
-                    break
-            except Exception:
-                pass
-            time.sleep(0.8)
-
-        # Formun yüklenmesini bekle
-        loaded = False
-        for _ in range(35):
-            time.sleep(0.6)
-            try:
-                check = self.eval_js("Boolean(document.getElementById('tridField') && document.getElementById('gsmField'))", timeout=5.0)
-                if check:
-                    loaded = True
-                    break
-            except Exception:
-                pass
-
-        if not loaded:
-            return False, "Mobil İmza giriş sayfası (giris.turkiye.gov.tr) yüklenemedi."
-
-        log_msg("[*] e-Devlet Mobil İmza formu dolduruluyor...")
-
-        # Adım 2: Formu doldur ve gönder
-        js_fill = f"""
-        (() => {{
-            const tr = document.getElementById('tridField');
-            const gsm = document.getElementById('gsmField');
-            const op = document.getElementById({json.dumps(op_id)}) || document.getElementById('turktelekom');
-            if (!tr || !gsm) return {{ok: false, error: "Form alanları bulunamadı"}};
-
-            tr.value = {json.dumps(tc)};
-            tr.dispatchEvent(new Event('input', {{bubbles: true}}));
-            tr.dispatchEvent(new Event('change', {{bubbles: true}}));
-
-            gsm.value = {json.dumps(gsm_digits)};
-            gsm.dispatchEvent(new Event('input', {{bubbles: true}}));
-            gsm.dispatchEvent(new Event('change', {{bubbles: true}}));
-
-            if (op) {{
-                op.click();
-                op.checked = true;
-                op.dispatchEvent(new Event('change', {{bubbles: true}}));
-            }}
-            const btn = document.querySelector('button[name="submitButton"]') ||
-                        document.querySelector('button[type="submit"]') ||
-                        document.querySelector('.btn-send') ||
-                        document.getElementById('submitButton') ||
-                        document.querySelector('input[type="submit"]');
-            if (btn) {{
-                btn.click();
-                return {{ok: true}};
-            }}
-            return {{ok: false, error: "Devam Et butonu bulunamadı"}};
-        }})()
-        """
-        fill_res = self.eval_js(js_fill, timeout=10.0)
-        if not fill_res or not fill_res.get("ok"):
-            return False, f"Form doldurulamadı: {fill_res}"
-
-        # Adım 3: Taahhütname (İmzala) veya doğrudan Parmak İzi ekranını bekle
-        time.sleep(1.0)
-        js_sign = """
-        (() => {
-            const err = document.querySelector(".errorMessage, .alert-danger");
-            if (err && err.innerText.trim()) {
-                return {error: err.innerText.trim()};
-            }
-            // 1. Önce İmzala / Onayla butonunu ara ve tıkla
-            const btn = Array.from(document.querySelectorAll('button, input[type="submit"], input[name="submitButton"], .btn-send')).find(b => {
-                const txt = (b.innerText || b.value || '').trim();
-                return txt === "İmzala" || txt.includes("İmzala") || txt === "Onayla";
-            });
-            if (btn) {
-                btn.click();
-                return {ok: true, step: "clicked_imzala"};
-            }
-
-            // 2. İmzala butonu yoksa, parmak izi / operatör bekleme ekranında mıyız kontrol et
-            const text = document.body.innerText || "";
-            if (text.includes("İşlemin Parmak İzi") || text.includes("operatorden cevap bekleniyor") || text.includes("parmak izi (2) görüntülenecektir")) {
-                return {ok: true, step: "already_waiting_fp"};
-            }
-            return {waiting: true};
-        })()
-        """
-        for _ in range(20):
-            time.sleep(0.6)
-            try:
-                s_res = self.eval_js(js_sign, timeout=6.0)
-                if s_res and s_res.get("error"):
-                    return False, f"e-Devlet Hatası: {s_res['error']}"
-                if s_res and s_res.get("ok"):
-                    if s_res.get("step") == "clicked_imzala":
-                        time.sleep(1.5)
-                    break
-            except Exception:
-                pass
-
-        log_msg("[*] Mobil İmza isteği operatöre iletildi. Parmak izi bekleniyor...")
-
-        # Adım 4: Parmak izi bilgisini yakala
-        js_wait_fp = """
-        (() => {
-            const text = document.body.innerText || "";
-            let fp = "";
-            const m = text.match(/(?:İşlemin\\s+)?Parmak\\s+İzi\\s*[:\\-]?\\s*([A-F0-9]{4}(?:\\s+[A-F0-9]{4})+)/i) ||
-                      text.match(/([A-F0-9]{4}(?:\\s+[A-F0-9]{4}){3,})/i);
-            if (m) {
-                fp = m[1].trim();
-            }
-            return {
-                url: window.location.href,
-                has_fingerprint: Boolean(fp),
-                fingerprint: fp,
-                is_waiting_user: text.includes("operatorden cevap") || text.includes("operatör") || text.includes("bekleniyor")
-            };
-        })()
-        """
-        fp_str = ""
-        for _ in range(25):
-            time.sleep(0.6)
-            try:
-                st = self.eval_js(js_wait_fp, timeout=5.0)
-                if st and st.get("fingerprint"):
-                    fp_str = st["fingerprint"]
-                    break
-            except Exception:
-                pass
-
-        log_msg("\n" + "=" * 70)
-        log_msg("  📲 MOBİL İMZA ONAY BİLDİRİMİ TELEFONUNUZA GÖNDERİLDİ!")
-        if fp_str:
-            log_msg(f"  🔑 İşlemin Parmak İzi : {fp_str}")
-        log_msg("  ⏳ Lütfen telefonunuza gelen bildirime PIN KODUNUZU girip ONAYLAYINIZ.")
-        log_msg("  (İşlem tamamlanınca otomatik algılanacaktır, 90 sn süreniz vardır...)")
-        log_msg("=" * 70 + "\n")
-
-        # Adım 5: Kullanıcının telefondan onaylamasını bekle (OAuth Onayla ve UYAP yönlendirmesi)
-        js_poll_done = """
-        (() => {
-            const url = window.location.href;
-            // 1. OAuth onay ekranı geldi mi?
-            const oauthBtn = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn')).find(b => {
-                const txt = (b.innerText || b.value || '').trim();
-                return txt === 'Onayla' || txt.includes('Onayla');
-            });
-            if (oauthBtn) {
-                oauthBtn.click();
-                return {status: "clicked_oauth_onayla"};
-            }
-            // 2. UYAP sayfasına ulaştık mı?
-            if (url.includes("avukat.uyap.gov.tr")) {
-                return {status: "at_uyap_portal", url};
-            }
-            return {status: "waiting", url};
-        })()
-        """
-
-        start_wait = time.time()
-        while time.time() - start_wait < 100:
-            time.sleep(2.0)
-            try:
-                poll = self.eval_js(js_poll_done, timeout=6.0)
-                if poll and poll.get("status") == "clicked_oauth_onayla":
-                    log_msg("[*] e-Devlet izin ekranı otomatik onaylandı. UYAP'a yönlendiriliyor...")
-                    time.sleep(2.0)
-
+            if self.is_logged_in():
                 uinfo = self.check_login_and_user()
                 usr = uinfo.get("user") or {}
-                tckn_val = str(usr.get("tcKimlikNo") or usr.get("tckn") or "")
-                if tckn_val:
-                    name_val = f"{usr.get('adi', '')} {usr.get('soyadi', '')}".strip() or "Avukat"
-                    return True, f"Mobil İmza ile başarıyla giriş yapıldı: {name_val} (TCKN: {tckn_val})"
-            except Exception:
-                pass
+                name = f"{usr.get('ad', '') or usr.get('adi', '')} {usr.get('soyad', '') or usr.get('soyadi', '')}".strip()
+                return True, f"Zaten aktif UYAP oturumu mevcut: {name or 'Avukat'}"
 
-        return False, "Mobil İmza onay süresi doldu (Zaman aşımı). Lütfen tekrar deneyiniz."
+            tc = re.sub(r"\D", "", str(tc))
+            gsm_digits = re.sub(r"\D", "", str(gsm))
+            if gsm_digits.startswith("90") and len(gsm_digits) == 12:
+                gsm_digits = gsm_digits[2:]
+            elif gsm_digits.startswith("0") and len(gsm_digits) == 11:
+                gsm_digits = gsm_digits[1:]
+            if len(tc) != 11:
+                return False, "T.C. Kimlik No 11 haneli olmalıdır."
+            if len(gsm_digits) != 10 or not gsm_digits.startswith("5"):
+                return False, "GSM No 5 ile başlayan 10 hane olmalıdır (örn. 5321234567)."
+
+            op_map = {"1": "turkcell", "turkcell": "turkcell",
+                      "2": "turktelekom", "turktelekom": "turktelekom", "avea": "turktelekom", "tt": "turktelekom",
+                      "3": "vodafone", "vodafone": "vodafone"}
+            op_id = op_map.get(str(operator).lower().strip(), "")
+            if not op_id:
+                if gsm_digits.startswith(("50", "55")):
+                    op_id = "turktelekom"
+                elif gsm_digits.startswith("54"):
+                    op_id = "vodafone"
+                else:
+                    op_id = "turkcell"
+
+            js_fill = f"""
+            (() => {{
+                const tr = document.getElementById('tridField');
+                const gsm = document.getElementById('gsmField');
+                if (!tr || !gsm) return {{ok: false, error: "Form alanları bulunamadı"}};
+                const setVal = (el, v) => {{
+                    const proto = Object.getPrototypeOf(el);
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    el.dispatchEvent(new Event('blur', {{bubbles: true}}));
+                }};
+                setVal(tr, {json.dumps(tc)});
+                setVal(gsm, {json.dumps(gsm_digits)});
+                const op = document.getElementById({json.dumps(op_id)});
+                if (!op) return {{ok: false, error: "Operatör seçeneği bulunamadı: {op_id}"}};
+                op.click(); op.checked = true;
+                op.dispatchEvent(new Event('change', {{bubbles: true}}));
+                const trOk = tr.value.replace(/\\D/g, '') === {json.dumps(tc)};
+                const gsmOk = gsm.value.replace(/\\D/g, '').endsWith({json.dumps(gsm_digits)});
+                if (!trOk || !gsmOk) return {{ok: false, error: "Form alanlarına değer yazılamadı"}};
+                if ({json.dumps(bool(getattr(self, "_mobil_fill_only", False)))}) return {{ok: true, filled_only: true}};
+                const btn = document.querySelector('button[name="submitButton"]') ||
+                            document.querySelector('input[name="submitButton"]');
+                if (!btn) return {{ok: false, error: "Devam Et butonu bulunamadı"}};
+                btn.click();
+                return {{ok: true}};
+            }})()
+            """
+            js_click = r"""
+            ((pattern) => {
+                const re = new RegExp(pattern);
+                const vis = e => !!(e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length));
+                const b = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn'))
+                    .filter(vis).find(x => re.test((x.innerText || x.value || '').trim()));
+                if (b) { b.click(); return true; }
+                return false;
+            })(%s)
+            """
+
+            log_msg("[*] UYAP Mobil İmza girişi başlatılıyor...")
+            st0 = self.eval_js(self._JS_MOBIL_STATE, timeout=10.0, target="auto") or {}
+            if st0.get("page") not in ("uyap_giris", "mobil_form"):
+                self.navigate(UYAP_BASE_URL + "/giris", target="auto")
+                time.sleep(2.0)
+
+            deadline = time.time() + timeout_s
+            last_select = last_click = 0.0
+            filled_at = signed_at = giris_since = 0.0
+            fp_shown = waiting_shown = False
+            oauth_clicks = 0
+            last_page = ""
+            while time.time() < deadline:
+                time.sleep(1.0)
+                try:
+                    st = self.eval_js(self._JS_MOBIL_STATE, timeout=8.0, retries=0, target="auto") or {}
+                except UyapBrowserError as e:
+                    return False, str(e)
+                except Exception:
+                    continue  # sayfa geçişi sırasında bağlam yok edilebilir
+                page = st.get("page", "")
+                if page != last_page:
+                    file_logger.info(f"Mobil İmza durum: {page}")
+                    last_page = page
+                if st.get("error") and page in ("mobil_form", "taahhut", "waiting", "edevlet_other") and filled_at:
+                    return False, f"e-Devlet: {st['error']}"
+
+                giris_since = (giris_since or time.time()) if page == "uyap_giris" else 0.0
+                if page == "uyap_giris":
+                    if filled_at:
+                        # e-Devlet'ten UYAP giriş sayfasına dönüldü: ya oturum açıldı ya da onay reddedildi
+                        if self.is_logged_in():
+                            break
+                        if time.time() - giris_since > 10:
+                            return False, "Mobil İmza işlemi tamamlanmadan UYAP giriş sayfasına dönüldü (iptal / ret / süre aşımı)."
+                    elif time.time() - last_select > 4:
+                        last_select = time.time()
+                        self.eval_js(self._JS_MOBIL_SELECT, timeout=8.0, retries=0, target="auto")
+                elif page == "mobil_form":
+                    if not filled_at:
+                        log_msg("[*] e-Devlet Mobil İmza formu dolduruluyor...")
+                        fr = self.eval_js(js_fill, timeout=10.0, retries=0, target="auto") or {}
+                        if not fr.get("ok"):
+                            return False, f"Mobil İmza formu doldurulamadı: {fr.get('error') or fr}"
+                        if fr.get("filled_only"):
+                            return False, "Test: form dolduruldu, gönderilmedi."
+                        filled_at = time.time()
+                    elif time.time() - filled_at > 25:
+                        return False, "Mobil İmza formu gönderildi ama e-Devlet ilerlemedi. Bilgileri kontrol edin."
+                elif page == "taahhut":
+                    if time.time() - signed_at > 8:
+                        signed_at = time.time()
+                        self.eval_js(js_click % json.dumps("İmzala"), timeout=8.0, retries=0, target="auto")
+                elif page == "waiting":
+                    if st.get("fp") and not fp_shown:
+                        fp_shown = True
+                        waiting_shown = False
+                    if not waiting_shown:
+                        waiting_shown = True
+                        log_msg("\n" + "=" * 70)
+                        log_msg("  📲 MOBİL İMZA ONAY BİLDİRİMİ TELEFONUNUZA GÖNDERİLDİ!")
+                        if st.get("fp"):
+                            log_msg(f"  🔑 İşlemin Parmak İzi : {st['fp']}  (telefondakiyle aynı olmalı)")
+                        log_msg("  ⏳ Telefonunuza gelen bildirimde Mobil İmza PIN'inizi girip onaylayın.")
+                        log_msg(f"  (Kalan süre ~{int(deadline - time.time())} sn. İptal için Ctrl+C)")
+                        log_msg("=" * 70 + "\n")
+                elif page == "oauth":
+                    if time.time() - last_click > 3 and oauth_clicks < 5:
+                        last_click = time.time()
+                        oauth_clicks += 1
+                        if self.eval_js(js_click % json.dumps("^(Onayla|İzin Ver)"), timeout=8.0, retries=0, target="auto"):
+                            log_msg("[*] e-Devlet izin ekranı onaylandı. UYAP'a yönlendiriliyor...")
+                elif page == "uyap_app":
+                    if self.is_logged_in():
+                        break
+
+            else:
+                return False, "Mobil İmza onay süresi doldu (zaman aşımı). Lütfen tekrar deneyin."
+
+            uinfo = self.check_login_and_user()
+            usr = uinfo.get("user") or {}
+            tckn_val = str(usr.get("tcKimlikNo") or usr.get("tckn") or "")
+            if not tckn_val:
+                return False, "e-Devlet onayı alındı ama UYAP oturumu doğrulanamadı. Tekrar deneyin."
+            name_val = f"{usr.get('adi', '')} {usr.get('soyadi', '')}".strip() or "Avukat"
+            return True, f"Mobil İmza ile giriş yapıldı: {name_val}"
+        except KeyboardInterrupt:
+            return False, "Mobil İmza girişi kullanıcı tarafından iptal edildi."
+        except UyapBrowserError as e:
+            return False, str(e)
+        except Exception as e:
+            return False, f"Mobil İmza giriş hatası: {e}"
 
     def query_uyap_islemlerim(self, tckn: str, start_date_str: str, end_date_str: str, islem_turu=None) -> dict:
         """uyap_islem_sorgula.ajx uç noktasına tarayıcı oturumu içinden POST isteği atar."""
@@ -1688,6 +1935,13 @@ class UyapDownloaderApp:
                         fp = alt_fp
                         v["path"] = str(alt_fp)
             if not fp.exists():
+                # Dosya taşınmış / yeniden adlandırılmış olabilir: kalıcı numarayla diskte ara
+                ident = str(v.get("is_emir_no") or "").strip() or (k.split("_")[-1] if "_" in k else "")
+                moved = self._find_on_disk(ident)
+                if moved:
+                    fp = moved
+                    v["path"] = str(moved)
+            if not fp.exists():
                 continue
             try:
                 sz = fp.stat().st_size
@@ -1743,19 +1997,21 @@ class UyapDownloaderApp:
         # 2. is_emir_no eşleşmesi (örn: islem_18313320805)
         elif is_emir and f"islem_{is_emir}" in self.history:
             entry = self.history[f"islem_{is_emir}"]
-        # 3. Geçmişteki is_emir_no alanları arasında ara
-        elif is_emir:
+        # 3. Geçmişteki is_emir_no alanları arasında ara (kısa birim evrak no'ları mahkemeler
+        #    arasında çakışabilir; yalnızca uzun, global işlem numaralarında güvenli)
+        elif is_emir and len(is_emir) >= 8:
             for h in self.history.values():
                 if str(h.get("is_emir_no") or "").strip() == is_emir:
                     entry = h
                     break
 
         # 4. Alternatif eşleşme: Birim adı, dosya no, tarih ve evrak adı birebir aynı mı?
-        if not entry and item:
-            b_adi = item.get("birim_adi")
-            d_no = item.get("dosya_no")
-            e_adi = item.get("evrak_adi")
-            tarih = item.get("tarih")
+        b_adi = item.get("birim_adi") if item else None
+        d_no = item.get("dosya_no") if item else None
+        e_adi = item.get("evrak_adi") if item else None
+        tarih = item.get("tarih") if item else None
+        # Boş alanlar (None == None) yanlış eşleşme üretmesin
+        if not entry and item and b_adi and e_adi and tarih:
             for h in self.history.values():
                 if (
                     h.get("birim_adi") == b_adi
@@ -1766,22 +2022,102 @@ class UyapDownloaderApp:
                     entry = h
                     break
 
-        if not entry:
-            return False
+        if entry:
+            path_str = entry.get("path")
+            fp = Path(path_str) if path_str else None
+            if fp and not fp.exists():
+                if "/ISLEMLERIM/" not in path_str and "/UYAP_Indirilenler/" in path_str:
+                    alt_p = Path(path_str.replace("/UYAP_Indirilenler/", "/UYAP_Indirilenler/ISLEMLERIM/"))
+                    if alt_p.exists():
+                        entry["path"] = str(alt_p)
+                        fp = alt_p
+            if fp and fp.exists() and fp.stat().st_size >= 128:
+                return True
 
-        path_str = entry.get("path")
-        if not path_str:
-            return False
-        fp = Path(path_str)
-        if not fp.exists():
-            if "/ISLEMLERIM/" not in path_str and "/UYAP_Indirilenler/" in path_str:
-                alt_p = Path(path_str.replace("/UYAP_Indirilenler/", "/UYAP_Indirilenler/ISLEMLERIM/"))
-                if alt_p.exists():
-                    entry["path"] = str(alt_p)
-                    fp = alt_p
-        if not fp.exists() or fp.stat().st_size < 128:
-            return False
-        return True
+        # 5. Geçmişte yok / yolu değişmiş: diskte dosya adındaki kalıcı numarayla ara
+        #    (taşınan, yeniden adlandırılan, başka cihazda indirilen dosyalar mükerrer inmesin)
+        ident = str(item.get("is_emir_no") or item.get("evrak_id") or is_emir or "").strip()
+        disk_path = self._find_on_disk(ident)
+        if disk_path:
+            hk = f"islem_{ident}" if (item.get("is_emir_no") or is_emir) else (ukey or f"disk_{ident}")
+            self.history[hk] = {
+                "path": str(disk_path),
+                "is_emir_no": str(item.get("is_emir_no") or is_emir or ""),
+                "birim_adi": item.get("birim_adi"),
+                "dosya_no": item.get("dosya_no"),
+                "evrak_turu": item.get("evrak_adi"),
+                "tarih": item.get("tarih"),
+                "kaynak": "disk_eslesme",
+            }
+            self._history_dirty = True
+            return True
+        return False
+
+    _DISK_ID_RX = re.compile(
+        r"_(\d{6,})(?:_\d{1,3})?\.(?:udf|pdf|tif|tiff|jpe?g|png|gif|docx?|xlsx?|zip|rar|xml|html?|txt|eyp|p7s)$",
+        re.IGNORECASE,
+    )
+
+    def _disk_roots(self) -> list:
+        roots = list(getattr(self, "disk_roots", None) or [])
+        if hasattr(self, "var_download_dir"):
+            try:
+                roots.append(Path(self.var_download_dir.get().strip() or str(DEFAULT_DOWNLOAD_DIR)))
+            except Exception:
+                pass
+        roots.append(DEFAULT_DOWNLOAD_DIR)
+        seen, out = set(), []
+        for r in roots:
+            try:
+                rp = Path(r).resolve()
+            except Exception:
+                continue
+            if rp not in seen and rp.exists():
+                seen.add(rp)
+                out.append(rp)
+        return out
+
+    def _disk_index(self) -> dict:
+        """İndirme klasör(ler)indeki dosyaları adlarının sonundaki numaraya göre indeksler
+        (örn. ..._evrak_10119302152.udf -> '10119302152'). Bir kez taranır, önbelleğe alınır."""
+        idx = getattr(self, "_disk_idx", None)
+        if idx is not None:
+            return idx
+        idx = {}
+        for root in self._disk_roots():
+            for dirpath, _dirs, files in os.walk(root):
+                for fn in files:
+                    m = self._DISK_ID_RX.search(fn)
+                    if not m:
+                        continue
+                    p = Path(dirpath) / fn
+                    try:
+                        if p.stat().st_size < 128:
+                            continue
+                    except OSError:
+                        continue
+                    # .udf asıl evrak; varsa onu tercih et
+                    if m.group(1) not in idx or fn.lower().endswith(".udf"):
+                        idx[m.group(1)] = p
+        self._disk_idx = idx
+        return idx
+
+    def _find_on_disk(self, ident: str):
+        ident = str(ident or "").strip()
+        if len(ident) < 6 or not ident.isdigit():
+            return None
+        p = self._disk_index().get(ident)
+        if p is not None and p.exists():
+            return p
+        return None
+
+    def flush_history_if_dirty(self):
+        if getattr(self, "_history_dirty", False):
+            try:
+                HISTORY_FILE.write_text(json.dumps(self.history, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._history_dirty = False
+            except Exception:
+                pass
 
     def _save_history(self):
         try:
@@ -2144,7 +2480,7 @@ class UyapDownloaderApp:
             return
 
         def task():
-            self.log(f"ArkSigner üzerinden e-İmza doğrulaması başlatılıyor (PIN: {pin})...")
+            self.log("ArkSigner üzerinden e-İmza doğrulaması başlatılıyor...")
             ok, msg = self.bridge.auto_relogin(pin=pin)
             if ok:
                 self.log(f"Başarılı: {msg}")
@@ -2887,6 +3223,63 @@ def refresh_dosya_ids_in_queue(bridge, queue: list, start_idx: int):
         print(f"[!] Oturum token'ı güncelleme uyarısı: {e}")
 
 
+_DOSYA_NUM_RX = re.compile(r"_(?:evrak_)?([0-9A-Za-z\-]+)$")
+
+
+def _norm_dno(dno: str) -> str:
+    """'2026/234 Esas' -> '2026-234' (dosya adlarında '/' yerine '-' kullanılır)."""
+    m = re.search(r"(\d{4})\s*[/\-_]\s*(\d+)", str(dno or ""))
+    return f"{m.group(1)}-{int(m.group(2))}" if m else ""
+
+
+def build_dosya_disk_keys(base: Path) -> dict:
+    """Dava dosyası evraklarının klasöründeki dosyalardan kalıcı eşleşme anahtarları çıkarır.
+    Dosya adı biçimleri: 'YYYY-MM-DD_..._evrak_NNNN.udf' ve eski 'YYYY-MM-DD_..._NNNN.udf'.
+    Windows / Termux yolu fark etmez; yalnızca dosya adı ve klasör adları kullanılır."""
+    keys = {"date_num": set(), "date_dno": set()}
+    if not base.exists():
+        return keys
+    for dirpath, _dirs, files in os.walk(base):
+        rel_dirs = os.path.relpath(dirpath, base)
+        for fn in files:
+            low = fn.lower()
+            if low.endswith((".part", ".csv", ".json", ".md", ".ics")) or ".yedek" in low:
+                continue
+            stem = fn.rsplit(".", 1)[0]
+            if not re.match(r"^\d{4}-\d{2}-\d{2}_", stem):
+                continue
+            try:
+                if (Path(dirpath) / fn).stat().st_size < 128:
+                    continue
+            except OSError:
+                continue
+            date = stem[:10]
+            m = _DOSYA_NUM_RX.search(stem)
+            if m:
+                keys["date_num"].add((date, m.group(1).lower()))
+            # Tarih önekini ve 'K2025-12' gibi karar no'larını dosya no sanma
+            for src in (stem[11:], rel_dirs):
+                for mm in re.finditer(r"(?<![0-9A-Za-z.])(\d{4})[\-_](\d+)(?![0-9.])", src):
+                    if 1990 <= int(mm.group(1)) <= 2100:
+                        keys["date_dno"].add((date, f"{mm.group(1)}-{int(mm.group(2))}"))
+    return keys
+
+
+def dosya_item_on_disk(item: dict, keys: dict, same_day_ok: bool) -> str:
+    """Diskte varsa eşleşme türünü ('no' / 'gun'), yoksa '' döner."""
+    date = str(item.get("tarih") or "")
+    clean_ev_id = str(item.get("evrak_id") or "").replace('"', "").replace("'", "").strip()
+    doc_num = sanitize_path_part(item.get("is_emir_no") or clean_ev_id[:8], max_len=20).lower()
+    if item.get("is_emir_no") and (date, doc_num) in keys["date_num"]:
+        return "no"
+    # Aynı gün + aynı dosya no: duruşma/karar/tensip gibi günde tek evrak olan türlerde güvenli
+    if same_day_ok:
+        dno = _norm_dno(item.get("dosya_no"))
+        if dno and (date, dno) in keys["date_dno"]:
+            return "gun"
+    return ""
+
+
 def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
     """
     Dava Dosyalarından Belirli Evrak Türlerini (Duruşma Tutanağı, Bilirkişi Raporu, Karar vb.)
@@ -2986,8 +3379,10 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
     # Akıllı Yargı Ön Filtreleme & Hedef Mahkeme Arama
     filter_birim_kw = getattr(args, "filter_birim", "").strip().lower()
+    yargi_filter = getattr(args, "yargi_turu", "").strip().lower()
     relevant_cases = []
     skipped_icra_count = 0
+    skipped_yargi_count = 0
 
     for c in cases:
         birim = str(c.get("birimAdi") or c.get("mahkemeAdi") or "").strip()
@@ -2998,6 +3393,22 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
             if filter_birim_kw not in tr_lower(birim) and filter_birim_kw not in tr_lower(dosya):
                 continue
 
+        # Yargı türü filtresi (hukuk, ceza, idari, icra)
+        if yargi_filter and yargi_filter not in ("all", "tumu"):
+            kat = infer_yargi_kategorisi(birim)
+            if yargi_filter == "hukuk" and kat != "Hukuk_Yargisi":
+                skipped_yargi_count += 1
+                continue
+            elif yargi_filter == "ceza" and kat != "Ceza_Yargisi":
+                skipped_yargi_count += 1
+                continue
+            elif yargi_filter == "idari" and kat != "Idari_Yargi":
+                skipped_yargi_count += 1
+                continue
+            elif yargi_filter == "icra" and kat not in ("Icra_Daireleri", "Icra_Mahkemeleri"):
+                skipped_yargi_count += 1
+                continue
+
         # Evrak türüne göre alakasız birimleri ele (Örn: İcra Dairesinde duruşma olmaz!)
         if not is_case_relevant_for_filter(birim, evrak_filter):
             skipped_icra_count += 1
@@ -3005,8 +3416,14 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
         relevant_cases.append(c)
 
+    if yargi_filter and yargi_filter not in ("all", "tumu"):
+        print(f"[*] Yargı Türü Filtresi ('{yargi_filter.upper()}'): {len(relevant_cases)} dosya seçildi ({skipped_yargi_count} dosya elendi).")
+
     if skipped_icra_count > 0:
         print(f"[*] Akıllı Yargı Filtresi: {skipped_icra_count} adet ilgisiz dosya (İcra Dairesi / Bürolar) tarama dışı bırakıldı.")
+
+    if getattr(args, "start_date", None):
+        print(f"[*] Tarih Süzgeci: {args.start_date} tarihinden günümüze olan evraklar filtrelenecek.")
 
     if filter_birim_kw:
         print(f"[*] Arama Filtresi ('{filter_birim_kw}'): {len(relevant_cases)} adet dosya eşleşti.")
@@ -3185,15 +3602,7 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
     if total_skipped_duplicates > 0:
         print(f"  MÜKERRER / KOPYA EVRAK (ELENDİ): {total_skipped_duplicates} adet")
 
-    download_queue = [
-        it for it in found_documents if not app_helper.is_item_already_downloaded(it)
-    ]
-    skipped_count = len(found_documents) - len(download_queue)
-    print(f"  DİSKTE MEVCUT (ATLANDI)        : {skipped_count} adet")
-    print(f"  İNDİRİLECEK YENİ EVRAK         : {len(download_queue)} adet")
-    print("=" * 70 + "\n")
-
-    sub_folder_name = "DURUSMA_TUTANAKLARI" if evrak_filter == "durusma" else (
+    sub_folder_name ="DURUSMA_TUTANAKLARI" if evrak_filter == "durusma" else (
         "BILIRKISI_RAPORLARI" if evrak_filter == "bilirkisi" else (
             "GEREKCELI_KARARLAR" if evrak_filter == "karar" else (
                 "TENSIP_ZAPITLARI" if evrak_filter == "tensip" else (
@@ -3212,6 +3621,34 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
     )
     target_base = download_dir / sub_folder_name
     target_base.mkdir(parents=True, exist_ok=True)
+
+    # Diskte var mı? UYAP'ın evrakId'si oturuma göre değiştiği için geçmiş anahtarı tutmaz;
+    # dosya adındaki kalıcı bilgilerle (tarih + birim evrak no / tarih + dosya no) eşleştirilir.
+    disk_keys = build_dosya_disk_keys(target_base)
+    same_day_ok = evrak_filter in ("durusma", "karar", "tensip", "iddianame", "kesinlesme")
+    download_queue = []
+    match_stats = {"no": 0, "gun": 0, "gecmis": 0}
+    for it in found_documents:
+        how = dosya_item_on_disk(it, disk_keys, same_day_ok)
+        if how:
+            match_stats[how] += 1
+            continue
+        if app_helper.is_item_already_downloaded(it):
+            match_stats["gecmis"] += 1
+            continue
+        download_queue.append(it)
+    print(f"  (eşleşme: evrak no+tarih {match_stats['no']}, dosya no+gün {match_stats['gun']}, geçmiş {match_stats['gecmis']})")
+    skipped_count = len(found_documents) - len(download_queue)
+    app_helper.flush_history_if_dirty()
+    print(f"  DİSKTE MEVCUT (ATLANDI)        : {skipped_count} adet")
+    print(f"  İNDİRİLECEK YENİ EVRAK         : {len(download_queue)} adet")
+    print("=" * 70 + "\n")
+
+    if getattr(args, "dry_run", False):
+        print("[i] --dry-run: hiçbir evrak indirilmedi. İndirilecek ilk 15 evrak:")
+        for it in download_queue[:15]:
+            print(f"    - {it['tarih']} | {it['birim_adi']} ({it['dosya_no']}) | {it['evrak_adi']} | no: {it.get('is_emir_no') or '-'}")
+        return
 
     if not download_queue:
         print("[✓] Tebrikler! Hedef evrakların tamamı zaten diskte sağlam olarak mevcut.")
@@ -3440,6 +3877,14 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
     print(f"  Kayıt Konumu: {target_base}")
     print("=" * 70 + "\n")
 
+    if evrak_filter == "tebligat":
+        try:
+            print("[*] Yeni indirilen tebligat ve mazbatalar analiz ediliyor (PTT Barkod, UETS Delil ID, TK m.7/a süre hesabı)...")
+            from tebligat_yoneticisi import scan_and_sync_all_tebligats
+            scan_and_sync_all_tebligats()
+        except Exception as teb_err:
+            print(f"[!] Tebligat takip tablosu senkronize edilirken hata: {teb_err}")
+
 
 def run_cli_durusmalar_mode(args, bridge, app_helper, download_dir, tckn):
     """
@@ -3588,6 +4033,188 @@ def run_cli_durusmalar_mode(args, bridge, app_helper, download_dir, tckn):
         pass
 
 
+def _ask(prompt: str) -> str | None:
+    """input() sarmalayıcı: Ctrl+C / EOF durumunda None döner (traceback yok)."""
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def _ask_secret(prompt: str) -> str | None:
+    """PIN gibi gizli girdileri ekrana yansıtmadan okur; hiçbir yere yazmaz."""
+    import getpass
+    try:
+        return getpass.getpass(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def _tckn_of(user: dict | None) -> str:
+    user = user or {}
+    return str(user.get("tcKimlikNo") or user.get("tckn") or "")
+
+
+def cli_ensure_session(args) -> tuple["UyapBrowserBridge", dict | None]:
+    """CLI giriş akışı: tarayıcıyı hazırlar, oturum yoksa Mobil İmza / e-İmza / elle giriş
+    seçeneklerini sunar. Kullanıcı vazgeçerse (bridge, None) döner. İstisna fırlatmaz."""
+    bridge = UyapBrowserBridge(port=args.port)
+    headless = bool(args.headless) or not bridge._detect_display()
+
+    # 1. Tarayıcı + UYAP sekmesi
+    while True:
+        print(f"[*] Tarayıcı hazırlanıyor (Port {bridge.port})...")
+        ok, msg = bridge.ensure_browser(headless=headless)
+        if not ok and not headless and IS_TERMUX:
+            # Termux:X11 açık değilse pencereli Chromium açılamaz: arka planda dene
+            print(f"[!] {msg}\n[*] Termux:X11 kullanılamıyor; tarayıcı arka planda (headless) deneniyor...")
+            headless = True
+            ok, msg = bridge.ensure_browser(headless=True)
+        if ok:
+            print(f"[*] {msg}")
+            ok, msg = bridge.ensure_ready("uyap")
+            if ok:
+                break
+        print("\n" + "=" * 70)
+        print(f"  [x] {msg}")
+        print("=" * 70)
+        print("  Tarayıcıyı elle başlatmak isterseniz:")
+        print(bridge._manual_launch_hint())
+        ans = _ask("\nTekrar denemek için Enter, menüye dönmek için 'q': ")
+        if ans is None or ans.lower() in ("q", "0", "h", "cik", "çık"):
+            return bridge, None
+
+    # 2. Mevcut oturum
+    print("[*] UYAP oturum durumu kontrol ediliyor...")
+    info = bridge.check_login_and_user()
+    if info.get("error"):
+        print(f"[!] {info['error']}")
+    user = info.get("user") or {}
+    if _tckn_of(user):
+        return bridge, user
+
+    pin = args.pin or DEFAULT_E_IMZA_PIN
+
+    # 3. Kayıtlı PIN (pin.txt / UYAP_E_IMZA_PIN / --pin) ile tek seferlik otomatik deneme
+    if pin and not args.no_auto_relogin:
+        ok_ark, _ = bridge.check_arksigner()
+        if ok_ark:
+            print("[*] Kayıtlı PIN ile e-İmza girişi deneniyor...")
+            ok, msg = bridge.auto_relogin(pin=pin)
+            print(f"[{'✓' if ok else 'x'}] {msg}")
+            if ok:
+                user = bridge.check_login_and_user().get("user") or {}
+                if _tckn_of(user):
+                    return bridge, user
+
+    cfg = load_user_config()
+    def_tc = getattr(args, "tc", "") or cfg.get("tc", "")
+    def_gsm = getattr(args, "gsm", "") or cfg.get("gsm", "")
+    def_op = getattr(args, "operator", "") or cfg.get("operator", "2")
+
+    def do_mobil(tc_val, gsm_val, op_val) -> dict:
+        ok, msg = bridge.login_with_mobil_imza(tc_val, gsm_val, op_val)
+        print(f"[{'✓' if ok else 'x'}] {msg}")
+        if ok:
+            save_user_config({"tc": tc_val, "gsm": gsm_val, "operator": op_val})
+            return bridge.check_login_and_user().get("user") or {}
+        return {}
+
+    # 4. Komut satırından Mobil İmza istendiyse doğrudan başlat
+    if getattr(args, "mobil_imza", False) or (getattr(args, "tc", "") and getattr(args, "gsm", "")):
+        if def_tc and def_gsm:
+            user = do_mobil(def_tc, def_gsm, def_op)
+            if _tckn_of(user):
+                return bridge, user
+
+    # 5. Giriş menüsü
+    while True:
+        print("\n" + "=" * 70)
+        print("  [!] UYAP OTURUMU AÇIK DEĞİL - LÜTFEN BİR GİRİŞ YÖNTEMİ SEÇİN:")
+        print("  1) Mobil İmza ile Giriş (telefonunuza onay gönderilir - Önerilen)")
+        print("  2) e-İmza ile Giriş (ArkSigner / Adalet e-İmza Client)")
+        print("  3) Tarayıcıda Kendim Giriş Yapacağım (girişi bekle)")
+        print("  0) Vazgeç / Menüye Dön")
+        print("=" * 70)
+        choice = _ask("Seçiminiz (0-3) [Varsayılan: 1]: ")
+        if choice is None or choice in ("0", "q"):
+            print("[*] Giriş iptal edildi.")
+            return bridge, None
+        choice = choice or "1"
+
+        if choice == "1":
+            tc_val, gsm_val, op_val = def_tc, def_gsm, def_op
+            if tc_val and gsm_val:
+                ans = _ask(f"Kayıtlı Mobil İmza bilgileri kullanılsın mı? ({tc_val[:3]}*****{tc_val[-3:]} - {gsm_val}) [E/h]: ")
+                if ans is None:
+                    continue
+                if ans.lower() in ("h", "hayir", "hayır", "n", "no"):
+                    tc_val = gsm_val = ""
+            if not (tc_val and gsm_val):
+                tc_val = _ask("T.C. Kimlik No: ")
+                gsm_val = _ask("GSM No (5xx..., başında 0 olmadan 10 hane): ") if tc_val is not None else None
+                op_val = _ask(f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: ") if gsm_val is not None else None
+                if tc_val is None or gsm_val is None or op_val is None:
+                    continue
+                op_val = op_val or def_op
+            if not tc_val or not gsm_val:
+                print("[!] T.C. Kimlik No ve GSM No zorunludur.")
+                continue
+            user = do_mobil(tc_val, gsm_val, op_val)
+
+        elif choice == "2":
+            ok_ark, msg_ark = bridge.check_arksigner()
+            if not ok_ark:
+                print(f"[x] {msg_ark}")
+                continue
+            hint = " (Enter = kayıtlı PIN)" if pin else ""
+            pin_in = _ask_secret(f"e-İmza PIN Kodu (ekranda görünmez){hint}: ")
+            if pin_in is None:
+                continue
+            pin_in = pin_in or pin
+            if not pin_in:
+                print("[!] PIN girilmedi.")
+                continue
+            print("[*] e-İmza ile giriş yapılıyor...")
+            ok, msg = bridge.auto_relogin(pin=pin_in)
+            print(f"[{'✓' if ok else 'x'}] {msg}")
+            if ok:
+                pin = pin_in  # yalnızca bu çalıştırmanın belleğinde (oturum düşerse yenilemek için)
+                args.pin = pin_in
+                user = bridge.check_login_and_user().get("user") or {}
+
+        elif choice == "3":
+            if bridge.is_headless:
+                print("[!] Tarayıcı arka planda (headless) çalışıyor; elle giriş yapılamaz. Mobil İmza'yı (1) kullanın.")
+                continue
+            print("[*] Açılan tarayıcı penceresinde UYAP'a giriş yapın (Mobil İmza / e-İmza / e-Devlet).")
+            print("    Giriş otomatik algılanacak. En fazla 5 dk beklenir; menüye dönmek için Ctrl+C.")
+            deadline = time.time() + 300
+            user = {}
+            try:
+                while time.time() < deadline:
+                    info = bridge.check_login_and_user()
+                    if info.get("error"):
+                        print(f"[x] {info['error']}")
+                        break
+                    user = info.get("user") or {}
+                    if _tckn_of(user):
+                        break
+                    time.sleep(3.0)
+                else:
+                    print("[!] 5 dk içinde giriş algılanmadı.")
+            except KeyboardInterrupt:
+                print("\n[*] Bekleme iptal edildi.")
+        else:
+            print("[!] Geçersiz seçim.")
+            continue
+
+        if _tckn_of(user):
+            return bridge, user
+
+
 def run_cli_mode(args):
     """
     Termux / Android / Konsol / Headless CLI Modu:
@@ -3607,128 +4234,13 @@ def run_cli_mode(args):
     download_dir.mkdir(parents=True, exist_ok=True)
     print(f"[*] İndirme Klasörü: {download_dir}")
 
-    # 2. Chromium Köprüsünü Başlat
-    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    headless = args.headless or not has_display
-    bridge = UyapBrowserBridge(port=args.port)
-    ok, msg = bridge.launch_or_connect(headless=headless)
-    print(f"[*] {msg}")
-
-    # 3. Oturum Kontrolü & e-İmza / Mobil İmza Bekleme
+    # 2. Tarayıcı + UYAP oturumu (Mobil İmza / e-İmza / elle giriş) - tek yerden
+    bridge, user = cli_ensure_session(args)
+    if not user:
+        return 1
+    tckn = _tckn_of(user)
     pin = args.pin or DEFAULT_E_IMZA_PIN
     auto_relogin = not args.no_auto_relogin
-
-    print("[*] UYAP oturum durumu kontrol ediliyor...")
-    info = bridge.check_login_and_user()
-    user = info.get("user") or {}
-    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-
-    # e-İmza varsa otomatik dene
-    if not tckn and auto_relogin and pin:
-        print(f"[*] e-İmza ile otomatik giriş deneniyor (PIN: {pin[:2]}**)...")
-        re_ok, re_msg = bridge.auto_relogin(pin=pin)
-        if re_ok:
-            print(f"[✓] {re_msg}")
-            time.sleep(1.0)
-            info = bridge.check_login_and_user()
-            user = info.get("user") or {}
-            tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-
-    # Oturum açılmamışsa bekle (Mobil İmza / e-Devlet veya e-İmza)
-    cfg = load_user_config()
-    def_tc = getattr(args, "tc", "") or cfg.get("tc", "")
-    def_gsm = getattr(args, "gsm", "") or cfg.get("gsm", "")
-    def_op = getattr(args, "operator", "") or cfg.get("operator", "2")
-
-    if not tckn and (getattr(args, "mobil_imza", False) or (getattr(args, "tc", "") and getattr(args, "gsm", ""))):
-        tc_in = getattr(args, "tc", "") or def_tc
-        gsm_in = getattr(args, "gsm", "") or def_gsm
-        op_in = getattr(args, "operator", "") or def_op
-        if tc_in and gsm_in:
-            m_ok, m_msg = bridge.login_with_mobil_imza(tc_in, gsm_in, op_in)
-            if m_ok:
-                print(f"[✓] {m_msg}")
-                save_user_config({"tc": tc_in, "gsm": gsm_in, "operator": op_in})
-                info = bridge.check_login_and_user()
-                user = info.get("user") or {}
-                tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-            else:
-                print(f"[x] {m_msg}")
-
-    while not tckn:
-        print("\n" + "=" * 70)
-        print("  [!] UYAP OTURUMU AÇIK DEĞİL - LÜTFEN BİR GİRİŞ YÖNTEMİ SEÇİN:")
-        print("  1) Mobil İmza ile Giriş (SIM Kartınıza Onay Gönderir - Önerilen)")
-        print("  2) e-İmza Otomatik Yenile (ArkSigner)")
-        print("  3) Mevcut Tarayıcı / Termux:X11 Oturumunu Bekle")
-        print("=" * 70)
-
-        try:
-            choice = input("Seçiminiz (1, 2 veya 3) [Varsayılan: 1]: ").strip() or "1"
-        except (EOFError, KeyboardInterrupt):
-            print("\nİşlem iptal edildi.")
-            sys.exit(0)
-
-        if choice == "1":
-            try:
-                tc_val, gsm_val, op_val = def_tc, def_gsm, def_op
-                if not (tc_val and gsm_val):
-                    tc_p = f"T.C. Kimlik No [{def_tc}]: " if def_tc else "T.C. Kimlik No: "
-                    tc_val = input(tc_p).strip() or def_tc
-                    gsm_p = f"GSM No (5xx...) [{def_gsm}]: " if def_gsm else "GSM No (başında 0 olmadan 10 hane): "
-                    gsm_val = input(gsm_p).strip() or def_gsm
-                    op_p = f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: "
-                    op_val = input(op_p).strip() or def_op
-                else:
-                    ans = input(f"Kayıtlı Mobil İmza bilgileri kullanılsın mı? ({def_tc} - {def_gsm}) [E/h]: ").strip().lower()
-                    if ans in ("h", "hayir", "n", "no"):
-                        tc_p = f"T.C. Kimlik No [{def_tc}]: "
-                        tc_val = input(tc_p).strip() or def_tc
-                        gsm_p = f"GSM No (5xx...) [{def_gsm}]: "
-                        gsm_val = input(gsm_p).strip() or def_gsm
-                        op_p = f"Operatör (1: Turkcell, 2: Türk Telekom, 3: Vodafone) [{def_op}]: "
-                        op_val = input(op_p).strip() or def_op
-
-                if not tc_val or not gsm_val:
-                    print("[!] T.C. Kimlik No ve GSM No zorunludur.")
-                    continue
-
-                m_ok, m_msg = bridge.login_with_mobil_imza(tc_val, gsm_val, op_val)
-                if m_ok:
-                    print(f"[✓] {m_msg}")
-                    save_user_config({"tc": tc_val, "gsm": gsm_val, "operator": op_val})
-                    info = bridge.check_login_and_user()
-                    user = info.get("user") or {}
-                    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-                else:
-                    print(f"[x] {m_msg}")
-            except (EOFError, KeyboardInterrupt):
-                print("\nİşlem iptal edildi.")
-                sys.exit(0)
-
-        elif choice == "2":
-            pin_in = input(f"e-İmza PIN Kodu [{pin}]: ").strip() or pin
-            if pin_in:
-                re_ok, re_msg = bridge.auto_relogin(pin=pin_in)
-                if re_ok:
-                    print(f"[✓] {re_msg}")
-                    info = bridge.check_login_and_user()
-                    user = info.get("user") or {}
-                    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-                else:
-                    print(f"[x] {re_msg}")
-            else:
-                print("[!] PIN girilmedi.")
-
-        else:
-            print(f"[*] Tarayıcı oturumu bekleniyor ({UYAP_BASE_URL})...")
-            for _ in range(15):
-                time.sleep(2.0)
-                info = bridge.check_login_and_user()
-                user = info.get("user") or {}
-                tckn = str(user.get("tcKimlikNo") or user.get("tckn") or "")
-                if tckn:
-                    break
 
     full_name = f"{user.get('adi', '')} {user.get('soyadi', '')}".strip() or "Avukat"
     baro = user.get("baroAdi") or ""
@@ -3736,8 +4248,10 @@ def run_cli_mode(args):
 
     # 4. Geçmişi yükle ve doğrula
     app_helper = UyapDownloaderApp.__new__(UyapDownloaderApp)
+    app_helper.disk_roots = [download_dir]
     app_helper.history = app_helper._verify_and_clean_history()
     print(f"[✓] Kayıtlı ve diskte doğrulanmış evrak sayısı: {len(app_helper.history)} adet")
+    print(f"[✓] İndirme klasöründe numarasıyla tanınan evrak: {len(app_helper._disk_index())} adet (mükerrer kontrolü için)")
 
     # Mod Seçimi Kontrolü
     mode = getattr(args, "mode", "islemlerim")
@@ -3829,7 +4343,7 @@ def run_cli_mode(args):
             if is_session_expired:
                 print(f"\n[!] UYARI: UYAP oturum süresi doldu (HTTP {resp.get('status', '401')}).")
                 if auto_relogin and pin:
-                    print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
+                    print("[*] e-İmza ile otomatik oturum yenileniyor...")
                     re_ok, re_msg = bridge.auto_relogin(pin=pin)
                     if re_ok:
                         print(f"[✓] {re_msg}")
@@ -3966,6 +4480,7 @@ def run_cli_mode(args):
         it for it in all_items if it["can_download"] and not app_helper.is_item_already_downloaded(it)
     ]
     skipped_count = len(all_items) - len(download_queue)
+    app_helper.flush_history_if_dirty()
 
     print("\n" + "=" * 70)
     print(f"  TOPLAM BULUNAN İŞLEM : {len(all_items)} adet")
@@ -4025,7 +4540,7 @@ def run_cli_mode(args):
                 # Oturum gerçekten düşmüşse yeniden giriş yap:
                 print(f"[!] UYARI: UYAP oturumu sonlanmış ({reason}). Yeniden bağlanılıyor... [Deneme {attempt}/{max_retries}]")
                 if auto_relogin and pin and attempt < max_retries:
-                    print(f"[*] e-İmza ile otomatik oturum yenileniyor (PIN: {pin[:2]}**)...")
+                    print("[*] e-İmza ile otomatik oturum yenileniyor...")
                     re_ok, re_msg = bridge.auto_relogin(pin=pin)
                     if re_ok:
                         print(f"[✓] {re_msg}. Evrak tekrar deneniyor...")
@@ -4163,17 +4678,50 @@ def main():
     parser.add_argument("--include-closed", action="store_true", default=True, help="Kapalı/Karara Çıkmış dosyaları da dahil et (varsayılan: True)")
     parser.add_argument("--no-closed", dest="include_closed", action="store_false", help="Kapalı dosyaları tarama dışı bırak")
     parser.add_argument("--filter-birim", type=str, default="", help="Yalnızca birim adı veya dosya no bu kelimeyi içeren dosyaları tara (örn: erzurum, 2025/506)")
+    parser.add_argument("--days", type=int, default=0, help="Geriye dönük taranacak gün sayısı (örn: 5, 7, 14, 30, 60, 90)")
+    parser.add_argument("--yargi-turu", type=str, default="", choices=["", "all", "tumu", "hukuk", "ceza", "idari", "icra"], help="Taranacak dosya/yargı türü: hukuk, ceza, idari, icra (boş bırakılırsa tümü)")
+
+    parser.add_argument("--dry-run", action="store_true", help="Tara ve mükerrer kontrolü yap, hiçbir şey indirme (dava dosyası modları)")
+    parser.add_argument("--browser-only",action="store_true", help="Sadece UYAP tarayıcısını (CDP portu açık, ayrı profil) başlat ve çık")
 
     args = parser.parse_args()
 
-    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if args.browser_only:
+        b = UyapBrowserBridge(port=args.port)
+        ok, msg = b.ensure_browser(headless=args.headless)
+        if ok:
+            ok, msg2 = b.ensure_ready("uyap")
+            msg = f"{msg} {msg2}"
+        print(f"[{'✓' if ok else 'x'}] {msg}")
+        if not ok:
+            print("  Elle başlatmak için:\n" + b._manual_launch_hint())
+        sys.exit(0 if ok else 2)
+
+    if args.days > 0 and not args.start_date:
+        args.start_date = (dt.date.today() - dt.timedelta(days=args.days)).strftime("%d.%m.%Y")
+
+    has_display = sys.platform == "win32" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
     if args.cli or not has_display or not HAS_TKINTER:
         if not HAS_TKINTER and not args.cli:
             print("[i] Bilgi: Tkinter grafik modülü bulunamadı, otomatik olarak Terminal / CLI modunda başlatılıyor.")
         elif not has_display and not args.cli:
             print("[i] Bilgi: Ekran (DISPLAY/X11) bulunamadı, otomatik olarak Terminal / CLI modunda başlatılıyor.")
-        run_cli_mode(args)
+        try:
+            rc = run_cli_mode(args)
+        except KeyboardInterrupt:
+            print("\n[*] İşlem kullanıcı tarafından durduruldu (Ctrl+C). İndirilenler kaydedildi; tekrar çalıştırınca kaldığı yerden devam eder.")
+            sys.exit(130)
+        except UyapBrowserError as e:
+            print(f"\n[x] {e}")
+            sys.exit(2)
+        except Exception as e:
+            import traceback
+            file_logger.error("Beklenmeyen hata:\n" + traceback.format_exc())
+            print(f"\n[x] Beklenmeyen hata: {e}")
+            print(f"    Ayrıntılar log dosyasına yazıldı: {LOG_FILE}")
+            sys.exit(1)
+        sys.exit(rc if isinstance(rc, int) else 0)
     else:
         root = tk.Tk()
         app = UyapDownloaderApp(root)
