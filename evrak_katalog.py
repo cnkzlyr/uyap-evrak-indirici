@@ -182,7 +182,19 @@ class Katalog:
         self.path = Path(path)
         self._local = threading.local()
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(dosya)")}
+        if "tarama" not in cols:  # eski kataloglar için şema güncellemesi
+            self.db.execute("ALTER TABLE dosya ADD COLUMN tarama TEXT")
+            self.db.execute("UPDATE dosya SET tarama='tamam' WHERE evrak_sayisi > 0")
         self.db.commit()
+
+    def set_tarama(self, dkey: str, durum: str):
+        with self.db:
+            self.db.execute("UPDATE dosya SET tarama=? WHERE dkey=?", (durum, dkey))
+
+    def eksik_dkeys(self) -> set:
+        return {r[0] for r in self.db.execute(
+            "SELECT dkey FROM dosya WHERE tarama IS NULL OR tarama <> 'tamam'")}
 
     @property
     def db(self) -> sqlite3.Connection:
@@ -776,15 +788,20 @@ class Motor:
             return {}
 
     def _evraklar_batch(self, ids: list) -> dict:
-        """Dosyaların TÜM evrak sayfalarını paralel çeker (sayfa sınırı yok)."""
+        """Dosyaların TÜM evrak sayfalarını paralel çeker (sayfa sınırı yok).
+        Başarılıysa {id: [sayfalar]}, değilse {id: {"err": "oturum"|"<UYAP hata kodu>"|..., "msg": ...}}."""
         import json as _json
         js = """(async () => { const ids = %s; const out = {};
           const post = (u, b) => fetch(u, {method:"POST", headers:{"Content-Type":"application/json","Cache-Control":"no-cache"}, body: JSON.stringify(b)});
           await Promise.all(ids.map(async (id) => { try {
             const pages = [];
             const r1 = await post("/list_dosya_evraklar.ajx", {dosyaId: id, pageNumber: 1});
-            if (!r1.ok) { out[id] = null; return; }
-            const d1 = await r1.json(); pages.push(d1);
+            const ct = r1.headers.get("content-type") || "";
+            const txt = await r1.text();
+            if (!r1.ok || ct.includes("text/html") || /^\\s*</.test(txt)) { out[id] = {err: "oturum", msg: "HTTP " + r1.status}; return; }
+            let d1; try { d1 = JSON.parse(txt); } catch(e) { out[id] = {err: "oturum", msg: "JSON değil"}; return; }
+            if (d1 && !Array.isArray(d1) && d1.errorCode) { out[id] = {err: String(d1.errorCode), msg: String(d1.error || "")}; return; }
+            pages.push(d1);
             let total = Number(d1 && d1.pageTotal) || 1;
             if (total <= 1) { try { const t = await (await post("/listDosyaEvraklarPageTotal.ajx", {dosyaId: id, pageNumber: 1})).json();
                  total = typeof t === "number" ? t : (Number(t && t.total) || 1); } catch(e) {} }
@@ -792,60 +809,112 @@ class Motor:
               const r = await post("/list_dosya_evraklar.ajx", {dosyaId: id, pageNumber: p});
               if (r.ok) pages.push(await r.json());
             }
-            out[id] = pages; } catch(e) { out[id] = null; } }));
+            out[id] = pages; } catch(e) { out[id] = {err: "ag", msg: String(e)}; } }));
           return out; })()""" % _json.dumps(ids)
         try:
-            res = self.bridge.eval_js(js, timeout=180.0)
+            res = self.bridge.eval_js(js, timeout=240.0)
             return res if isinstance(res, dict) else {}
         except Exception:
             return {}
 
     # ------------------------------------------------------------------ tarama
+    @staticmethod
+    def _case_dkey(c: dict) -> str:
+        return Katalog.dkey_of(c.get("birimAdi") or c.get("mahkemeAdi"), c.get("dosyaNo") or c.get("dosyaNO"))
+
+    def _fetch_cases(self, include_closed: bool) -> list:
+        cases = self.bridge.query_tum_dosyalar(include_closed=include_closed, use_cache=False) or []
+        self.case_ids = {self._case_dkey(c): str(c.get("dosyaId") or c.get("dosyaID") or "") for c in cases}
+        return cases
+
     def scan(self, include_closed: bool = True, batch: int = 6, only_dkeys: set | None = None) -> int:
+        """Dosyaların evrak listelerini kataloğa yazar. Oturum düşerse yeniden giriş yaptırıp
+        kaldığı dosyadan devam eder; taranamayan dosyalar 'tarama' sütununda işaretli kalır
+        (sonra only_dkeys=katalog.eksik_dkeys() ile yalnızca onlar taranabilir)."""
         from uyap_indirici import infer_yargi_kategorisi
         self._new_session()
         self.log("[*] UYAP'taki tüm dosyalar sorgulanıyor...")
-        cases = self.bridge.query_tum_dosyalar(include_closed=include_closed, use_cache=False) or []
+        cases = self._fetch_cases(include_closed)
         if not cases:
-            self.log("[!] Dosya listesi alınamadı (oturum kapalı olabilir).")
-            return 0
-        if only_dkeys:
-            cases = [c for c in cases if Katalog.dkey_of(c.get("birimAdi"), c.get("dosyaNo") or c.get("dosyaNO")) in only_dkeys]
-        self.log(f"[✓] {len(cases)} dosya bulundu. Taraf ve evrak listeleri taranıyor...")
-        all_taraf = []
-        taraf_map = {}
-        ids = [str(c.get("dosyaId") or c.get("dosyaID") or "") for c in cases]
-        for i in range(0, len(ids), 20):
+            if self._session_dead() and self._relogin():
+                cases = self._fetch_cases(include_closed)
+            if not cases:
+                self.log("[!] Dosya listesi alınamadı (oturum kapalı olabilir).")
+                return 0
+        if only_dkeys is not None:
+            cases = [c for c in cases if self._case_dkey(c) in only_dkeys]
+        self.log(f"[✓] {len(cases)} dosya taranacak. Taraf ve evrak listeleri çekiliyor...")
+        taraf_map = {}  # dkey -> taraf listesi
+        for i in range(0, len(cases), 20):
             if self.stop_flag.is_set():
                 return 0
-            taraf_map.update(self._taraflar_batch([x for x in ids[i:i + 20] if x]))
-            self.progress(i, len(ids), "Taraf bilgileri")
-        all_taraf = [v for v in taraf_map.values() if v]
-        avukat = self._avukat_adi(all_taraf)
+            chunk = cases[i:i + 20]
+            res = self._taraflar_batch([str(c.get("dosyaId") or c.get("dosyaID") or "") for c in chunk])
+            for c in chunk:
+                v = res.get(str(c.get("dosyaId") or c.get("dosyaID") or ""))
+                if v:
+                    taraf_map[self._case_dkey(c)] = v
+            self.progress(min(i + 20, len(cases)), len(cases), "Taraf bilgileri")
+        avukat = self._avukat_adi(list(taraf_map.values()))
         if avukat:
             self.log(f"[i] Müvekkil tespiti için vekil adı: {avukat}")
-        total_rows = 0
-        for i in range(0, len(cases), batch):
+
+        total_rows, done, n_ok, n_err = 0, 0, 0, 0
+        pending = list(cases)
+        relogins = 0
+        while pending:
             if self.stop_flag.is_set():
                 self.log("[!] Tarama durduruldu.")
                 break
-            chunk = cases[i:i + batch]
-            cids = [str(c.get("dosyaId") or c.get("dosyaID") or "") for c in chunk]
-            res = self._evraklar_batch([x for x in cids if x])
-            for c, cid in zip(chunk, cids):
-                birim = str(c.get("birimAdi") or "")
-                dkey = self.kat.upsert_dosya(c, taraf_map.get(cid), avukat, infer_yargi_kategorisi(birim), self.oturum)
-                self.case_ids[dkey] = cid
+            chunk, pending = pending[:batch], pending[batch:]
+            res = self._evraklar_batch([self.case_ids.get(self._case_dkey(c), "") for c in chunk])
+            retry = []
+            for c in chunk:
+                dkey = self._case_dkey(c)
+                cid = self.case_ids.get(dkey, "")
+                self.kat.upsert_dosya(c, taraf_map.get(dkey), avukat,
+                                      infer_yargi_kategorisi(str(c.get("birimAdi") or "")), self.oturum)
                 pages = res.get(cid)
-                if pages is None:
-                    try:
-                        pages = self.bridge.query_dosya_evraklar(cid)
-                    except Exception:
-                        pages = []
-                total_rows += self.kat.ingest_pages(dkey, pages or [], self.oturum)
+                if isinstance(pages, list):
+                    total_rows += self.kat.ingest_pages(dkey, pages, self.oturum)
+                    self.kat.set_tarama(dkey, "tamam")
+                    n_ok += 1
+                    done += 1
+                elif isinstance(pages, dict) and pages.get("err") not in ("oturum", "ag", None):
+                    # UYAP'ın kalıcı yanıtı (ör. vekil kaydı yok): tekrar denemeye gerek yok
+                    self.kat.set_tarama(dkey, f"hata: {pages.get('err')} {pages.get('msg', '')[:120]}")
+                    n_err += 1
+                    done += 1
+                else:
+                    retry.append(c)
+            if retry:
+                if self._session_dead():
+                    relogins += 1
+                    if relogins > 5 or not self._relogin():
+                        for c in retry + pending:
+                            self.kat.set_tarama(self._case_dkey(c), "hata: oturum düştü")
+                        self.log(f"[x] Oturum yenilenemedi. {len(retry) + len(pending)} dosya taranamadı; "
+                                 "tekrar giriş yapıp 'Yalnızca eksikleri tara' ile devam edin.")
+                        pending = []
+                    else:
+                        self._fetch_cases(include_closed)  # dosya kimlikleri oturuma özgü: tazele
+                        pending = retry + pending
+                else:
+                    # Geçici ağ/sunucu hatası: bir kez daha, sonra hatalı say
+                    for c in retry:
+                        c["_deneme"] = c.get("_deneme", 0) + 1
+                        if c["_deneme"] >= 3:
+                            self.kat.set_tarama(self._case_dkey(c), "hata: yanıt alınamadı")
+                            n_err += 1
+                            done += 1
+                        else:
+                            pending.append(c)
+                    self._sleep(3.0)
             self.kat.db.commit()
-            self.progress(min(i + batch, len(cases)), len(cases), f"Evrak listeleri ({total_rows} kayıt)")
+            self.progress(done, len(cases), f"Evrak listeleri ({total_rows} kayıt, {n_err} hatalı)")
             self._sleep(0.3)
+        self.log(f"[i] Tarama: {n_ok} dosya tamam, {n_err} dosya UYAP'tan liste vermedi"
+                 + (", kalanlar oturum nedeniyle yarım" if pending or self.stop_flag.is_set() else "") + ".")
         self.kat.finalize_scan()
         self.kat.match_existing_disk([self.download_dir / n for n in (
             "DAVA_EVRAKLARI", "DURUSMA_TUTANAKLARI", "GEREKCELI_KARARLAR", "TEBLIGATLAR",
@@ -869,9 +938,10 @@ class Motor:
             return False
         res = self._evraklar_batch([cid])
         pages = res.get(cid)
-        if pages is None:
+        if not isinstance(pages, list):
             return False
         self.kat.ingest_pages(dkey, pages, self.oturum)
+        self.kat.set_tarama(dkey, "tamam")
         with self.kat.db:
             self.kat.db.execute("UPDATE dosya SET dosya_id=?, oturum=? WHERE dkey=?", (cid, self.oturum, dkey))
         return True
@@ -889,7 +959,7 @@ class Motor:
             self._new_session()
             self.log("[✓] Oturum yenilendi.")
         else:
-            self.log("[x] Oturum yenilenemedi; indirme durduruldu.")
+            self.log("[x] Oturum yenilenemedi; işlem durduruldu.")
         return ok
 
     def download(self, ids: list[int]) -> dict:

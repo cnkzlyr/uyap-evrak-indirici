@@ -4702,6 +4702,7 @@ def main():
             motor = evrak_katalog.Motor(bridge, evrak_katalog.Katalog(),
                                         Path(args.dir) if args.dir else DEFAULT_DOWNLOAD_DIR,
                                         progress=lambda d, t, s="": print(f"\r  {d}/{t} {s}".ljust(70), end="", flush=True))
+            motor.relogin = lambda: bool(cli_ensure_session(args)[1])
             motor.scan(include_closed=args.include_closed)
             print()
         except KeyboardInterrupt:

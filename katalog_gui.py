@@ -526,10 +526,10 @@ class KatalogApp:
         if info.get("user"):
             self._session_ok(info["user"])
             return True
-        if self.login_method:
-            if self._relogin_worker():
-                return True
-        # Kullanıcıya giriş yöntemi sor (ana iş parçacığında)
+        return self._relogin_worker()
+
+    def _ask_method_blocking(self) -> bool:
+        """İş parçacığından çağrılır: giriş yöntemini kullanıcıya sorar ve bekler."""
         ark_ok, _ = self.bridge.check_arksigner()
         ev, box = threading.Event(), {}
         self.ui_q.put(("ask_login", ark_ok, ev, box))
@@ -538,16 +538,17 @@ class KatalogApp:
             self.log("[i] Giriş iptal edildi.")
             return False
         self.login_method = box["method"]
-        return self._relogin_worker()
+        return True
 
     def _session_ok(self, user: dict):
         ad = " ".join(str(user.get(k) or "") for k in ("adi", "soyadi")).strip() or "giriş yapıldı"
         self.ui_q.put(("session", f"Oturum: açık ({ad})", True))
 
     def _relogin_worker(self) -> bool:
-        m = self.login_method
-        if not m:
+        self.ui_q.put(("session", "Oturum: kapalı — giriş gerekiyor", False))
+        if not self.login_method and not self._ask_method_blocking():
             return False
+        m = self.login_method
         if m[0] == "eimza":
             self.log("[*] e-İmza ile giriş yapılıyor...")
             ok, msg = self.bridge.auto_relogin(m[1])
@@ -625,13 +626,24 @@ class KatalogApp:
         self._submit("Bağlantı", self._ensure_session)
 
     def on_scan(self):
-        if not messagebox.askyesno("UYAP'ı tara", "Tüm açık ve kapalı dosyaların evrak listeleri kataloğa yazılacak "
-                                   "(indirme yapılmaz). 700+ dosyada birkaç dakika sürebilir. Başlasın mı?"):
+        eksik = self.kat.eksik_dkeys()
+        n_dosya = self.kat.stats()["dosya"]
+        only = None
+        if n_dosya and eksik:
+            ans = messagebox.askyesnocancel(
+                "UYAP'ı tara",
+                f"Katalogda {len(eksik)} dosyanın evrak listesi eksik veya hatalı.\n\n"
+                "Evet: yalnızca eksik dosyaları tara\nHayır: tüm dosyaları baştan tara\nİptal: vazgeç")
+            if ans is None:
+                return
+            only = eksik if ans else None
+        elif not messagebox.askyesno("UYAP'ı tara", "Tüm açık ve kapalı dosyaların evrak listeleri kataloğa yazılacak "
+                                     "(indirme yapılmaz). 700+ dosyada birkaç dakika sürebilir. Başlasın mı?"):
             return
 
         def job():
             if self._ensure_session():
-                self.motor.scan(include_closed=True)
+                self.motor.scan(include_closed=True, only_dkeys=only)
         self._submit("Tarama", job)
 
     def _start_download(self, ids: list[int]):
