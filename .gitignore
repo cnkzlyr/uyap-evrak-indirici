@@ -30,3 +30,10 @@ venv/
 uyap_katalog.db*
 jars/
 .katalog_filtre.json
+
+# Derleme ciktilari ve yerel veriler
+dist/
+build/
+.onbellek/
+loglar/
+*.spec.bak

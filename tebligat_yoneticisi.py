@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır. / All rights reserved.
 """
 UYAP Tebligat ve UETS Yönetim & Raporlama Modülü
 ===============================================
@@ -24,7 +25,8 @@ import zipfile
 import datetime as dt
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+# Paketlenmiş uygulamada yazılabilir veri klasörü UYAP_VERI_DIZINI ile verilir
+BASE_DIR = Path(os.environ.get("UYAP_VERI_DIZINI") or Path(__file__).resolve().parent)
 if Path("/sdcard/Download/UYAP_Indirilenler").exists():
     DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
 elif (BASE_DIR.parent / "UYAP_Indirilenler").exists():
@@ -34,7 +36,7 @@ elif (BASE_DIR / "UYAP_Indirilenler").exists():
 else:
     DEFAULT_DOWNLOAD_DIR = BASE_DIR / "UYAP_Indirilenler"
 PRIMARY_CSV_PATH = DEFAULT_DOWNLOAD_DIR / "TEBLIGATLAR" / "tebligat_takip_listesi.csv"
-BACKUP_CSV_PATH = Path(__file__).resolve().parent / "tebligat_takip_listesi.csv"
+BACKUP_CSV_PATH = BASE_DIR / "tebligat_takip_listesi.csv"
 
 CSV_HEADERS = [
     "Sıra_No",

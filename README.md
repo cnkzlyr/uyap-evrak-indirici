@@ -1,12 +1,128 @@
-# 🏛️ UYAP Avukat Portal - Güvenli ve Kategorili Toplu Evrak İndirici & Hukuk Otomasyonu
+# ⚖️ UYAP Evrak Yöneticisi (UYAP Avukat Portal Evrak İndirici & Hukuk Otomasyonu)
 
-UYAP Avukat Portal (`https://avukat.uyap.gov.tr`) üzerindeki tüm derdest ve kapalı dava dosyalarını, duruşma tutanaklarını, bilirkişi raporlarını, gerekçeli kararları, dilekçe/layihaları, tebligat mazbatalarını ve duruşma takvimini güvenli, kategorili ve mükerrersiz şekilde indiren, işleyen ve yapay zeka analizine hazır hale getiren profesyonel otomasyon sistemi.
+**© 2026 Av. Can KIZILYAR — Tüm hakları saklıdır.** (bkz. [LICENSE](LICENSE))
 
-Sistem **Windows 11 (Chrome / Edge)**, **Linux / macOS** ve **Android (Termux / Termux:X11)** platformlarında %100 yerel, güvenli ve kesintisiz çalışır.
+UYAP Avukat Portal (`https://avukat.uyap.gov.tr`) üzerindeki tüm derdest ve kapalı dava dosyalarının evraklarını ve eklerini **kataloglayan, filtreleyerek seçtiren, her evrakı yalnızca bir kez indiren, PDF'e dönüştüren ve görüntüleyen** masaüstü uygulaması. Windows, Linux, macOS (Intel + Apple Silicon) ve Android (Termux:X11) üzerinde çalışır.
 
 ---
 
-## 🚀 Temel Özellikler
+## 🆕 Sürüm 3.0 — Neler var?
+
+| Özellik | Açıklama |
+|---|---|
+| **Kurulabilir uygulama** | Windows kurulum dosyası (`UYAPEvrak-…-Windows-Kurulum.exe`), Linux AppImage/deb/rpm, macOS dmg. Python, Java (JRE), Pillow, pypdf, yazı tipleri dahil; ayrıca bir şey kurmak gerekmez. |
+| **Evrak kataloğu** | Yüz binlerce evrak ve ek, indirmeden önce yerel veritabanına yazılır; saniyeler içinde süzülür. Katalog kalıcıdır, her açılışta yeniden taranmaz. |
+| **Üç durumlu filtreler** | Evrak türü, kategori, indirme durumu, birim, dosya türü, yargı, açık/kapalı, uzantı listelerinde **1. tık yeşil = getir, 2. tık kırmızı = hariç tut, 3. tık = kaldır**. A→Z / sayıya göre sıralama. |
+| **Metin aramada hariç tutma** | Taraf, müvekkil, açıklama, içerik, dosya no: `sungur -ahmet`, `"ağır ceza" -"sulh ceza"`. Türkçe harf duyarsız. |
+| **Gerçek UYAP evrak türleri** | ~600 asıl evrak türü ve ~5.000 ek adından çıkarılmış 18 kategori (Tutuklama/Adli Kontrol, İfade/Tutanak/Keşif, Vekaletname, İcra/Haciz, Makbuz/Harç, Talimat, Üst Yazı …). |
+| **Her evrak bir kez** | İstinaf/birleşen/talimat dosyalarındaki tekrarlar tek kayıt; başka evrakın ekinde gelen aynı belge içerik özetiyle tanınır ve ikinci kez yazılmaz. |
+| **Görüntüleyici + önbellek** | Çift tık: indirilmişse PDF'i açılır; indirilmemişse UYAP'tan önbelleğe alınıp PDF'e çevrilerek açılır ("önbellekte"). Sonra indirilirse önbellekten taşınır. Ayrıntı panelinde evrakın tüm ekleri. |
+| **Takılmayan indirme** | UYAP 40 sn içinde yanıt vermezse istek kesilip yeniden denenir (önceden dakikalarca bekleyebiliyordu). Oturum düşerse e-İmza/Mobil İmza ile yeniden girilir ve aynı evrak tekrar denenir; bozuk/HTML yanıt asla kaydedilmez. |
+| **İlerleme ve süre tahmini** | Yüzde, kalan süre, indirilen MB, mükerrer/hata sayıları; 45 sn yanıt gelmezse "UYAP yanıtı bekleniyor" göstergesi. |
+| **Ayrıntılı günlük** | Ekranda renkli günlük + `loglar/katalog.log` (bağlantı, oturum, her deneme, süre, dönüşüm). Yardım > *Günlükleri paketle* ile Masaüstüne zip. PIN asla yazılmaz. |
+| **Sağ tık "PDF'e dönüştür"** | Dosya Gezgini'nde .udf .tif .tiff .docx .doc .rtf .odt .jpg .png (tekli/çoklu) → aynı adla PDF. UYAP Editör açmadan. |
+| **Menüler** | İşlemlerim indirme, duruşma takvimi (.ics), tebligat & süre analizi, evrak zenginleştirme, toplu PDF dönüştürme, görünür tarayıcı, sağ tık menüsü kur/kaldır, kılavuz. |
+| **Uyarlanabilir arayüz** | ☰ ile filtre paneli gizlenir; dar ekranda (Android/Termux:X11) otomatik gizlenir; yakınlaştır/uzaklaştır; ipuçları; yumuşak geçişli bildirimler. |
+
+---
+
+## 📥 Kurulum
+
+### Windows 10/11 (önerilen)
+1. [Releases](https://github.com/cnkzlyr/uyap-evrak-indirici/releases) sayfasından `UYAPEvrak-3.0.0-Windows-Kurulum.exe` dosyasını indirip çalıştırın (yönetici yetkisi istemez).
+2. Kurulumda "sağ tık menüsü" kutusunu işaretli bırakın.
+3. Başlat menüsünden **UYAP Evrak Yöneticisi**'ni açın.
+
+> **UDF → PDF için:** Havelsan UYAP Editör kütüphaneleri lisanslıdır ve pakete konmaz. Bilgisayarınızda UYAP Editör kuruluysa otomatik bulunur. Bulunamazsa `editor_*.jar` dosyalarını `%LOCALAPPDATA%\UYAPEvrak\jars` klasörüne kopyalayın. TIF/DOCX/resim dönüşümü bundan bağımsızdır (DOCX için Word veya LibreOffice gerekir).
+
+### Linux
+- **AppImage:** `chmod +x UYAPEvrak-*.AppImage && ./UYAPEvrak-*.AppImage`
+- **Debian/Ubuntu:** `sudo apt install ./uyap-evrak_3.0.0_amd64.deb` → menüde "UYAP Evrak Yöneticisi" veya `uyap-evrak`
+- **Fedora/openSUSE:** `sudo dnf install ./uyap-evrak-3.0.0.x86_64.rpm`
+- Chromium veya Google Chrome kurulu olmalıdır. Sağ tık menüsü (Nautilus/Dolphin): Araçlar > *Sağ tık menüsünü kur*.
+
+### macOS (Intel ve Apple Silicon)
+`UYAPEvrak-3.0.0-macOS-x86_64.dmg` (Intel) veya `…-arm64.dmg` (M1/M2/M3/M4) dosyasını açıp uygulamayı **Applications** klasörüne sürükleyin. İmzasız olduğu için ilk açılışta uygulamaya sağ tıklayıp **Aç** deyin. Google Chrome kurulu olmalıdır.
+
+### Android (Termux + Termux:X11)
+Android'de Tk arayüzü APK olarak paketlenemez; uygulama Termux içinde Termux:X11 ekranında tam arayüzüyle çalışır:
+```bash
+curl -fsSL https://raw.githubusercontent.com/cnkzlyr/uyap-evrak-indirici/main/packaging/android/termux_uygulama_kur.sh | bash
+uyap-evrak
+```
+Termux:Widget ile ana ekrana "UYAP Evrak" kısayolu eklenebilir. Dar ekranda filtre paneli kendiliğinden gizlenir (☰ ile açılır). Android'de e-İmza (ArkSigner) yoktur; Mobil İmza kullanılır.
+
+### Kaynak koddan çalıştırma (geliştirici)
+```bash
+pip install -r requirements.txt
+python uygulama.py            # arayüz
+python uygulama.py --cli      # eski komut satırı menüsü
+```
+
+---
+
+## 🧭 Kısa kullanım
+
+1. **Bağlan / Giriş** → tarayıcı arka planda açılır; oturum yoksa e-İmza (PIN yalnızca bellekte) veya Mobil İmza.
+2. **UYAP'ı Tara** → evrak listesi kataloğa yazılır. Günlük kullanım: "yalnızca AÇIK dosyaları güncelle".
+3. Soldan filtreleyin (yeşil getir / kırmızı hariç), sağda sonucu görün. Örnek: Evrak türünde "Genel Karar/Müzekkere"yi kırmızı yapmak, o müzekkerelere ek olarak gelmiş yüz binlerce dosya suretini dışarıda bırakır.
+4. **Filtredekilerin tümünü indir** veya seçip **Seçilileri indir** (Ctrl+D). Çift tıkla aç; indirilmemişse önbelleğe alınır.
+5. Ayrıntılı açıklamalar ve örnekler: uygulamada **Yardım > Kullanım kılavuzu**.
+
+### Asıl evrak / ek nedir?
+UYAP'ta her evrakın altında ekleri olabilir. Listede ekler `↳ EK03: …` diye girintili gösterilir; diskte asıl evrakın adıyla başlar:
+```
+2025-07-10_Talimat Üst Yazısı_no68987.udf            (+ .pdf)
+2025-07-10_Talimat Üst Yazısı_no68987__EK01_İfade Tutanağı.tif   (+ .pdf)
+```
+"Dosya biçimi" listesindeki **"Henüz bilinmiyor"**: UYAP, indirilmemiş asıl evrakların biçimini önceden bildirmez (çoğu .udf'dir); indirilince gerçek biçim yazılır.
+
+### PDF dönüşümü nasıl çalışır?
+| Kaynak | Yöntem | Not |
+|---|---|---|
+| `.udf` | Havelsan UYAP Editör motoru (Java, `uyap.UdfBatchPdfConverter`) | Yazı tipleri PDF'e gömülür; Türkçe karakterler korunur. Her dosya grubunun indirmesi bitince arka planda, tek Java işlemiyle. |
+| `.tif` / `.tiff` | Pillow | Çok sayfalı; her sayfa A4'e sığdırılır (yatay sayfa yatay A4). |
+| `.jpg` `.png` `.bmp` `.gif` | Pillow | A4 PDF. |
+| `.docx` `.doc` `.rtf` `.odt` | Microsoft Word (COM) → yoksa LibreOffice | Sağ tık menüsü ve toplu dönüştürmede. |
+
+PDF her zaman kaynağın yanına **aynı adla** yazılır, var olanın üzerine yazılmaz. Dönüşüm başarısız olursa sebebi günlüğe yazılır (ör. UYAP Editör kütüphaneleri bulunamadı).
+
+### Veri ve günlük klasörleri
+| | Kaynak koddan | Kurulu uygulama |
+|---|---|---|
+| Katalog, ayarlar, önbellek, günlükler | proje klasörü | Windows `%LOCALAPPDATA%\UYAPEvrak`, macOS `~/Library/Application Support/UYAPEvrak`, Linux `~/.local/share/UYAPEvrak` |
+| İndirilen evraklar | `../UYAP_Indirilenler` | `Belgeler/UYAP_Indirilenler` (Android: `Download/UYAP_Indirilenler`) |
+
+Ortam değişkenleriyle değiştirilebilir: `UYAP_VERI_DIZINI`, `UYAP_INDIRME_DIZINI`, `UYAP_JARS`, `UYAP_FONT_DIR`.
+
+---
+
+## 🛠️ Paketleri derleme (geliştirici)
+
+Tüm paketler GitHub Actions ile otomatik üretilir: [.github/workflows/paketler.yml](.github/workflows/paketler.yml). `v3.0.0` gibi bir etiket gönderildiğinde (veya Actions sekmesinden elle) Windows, Linux, macOS Intel ve macOS Apple Silicon derlenir ve Releases'e eklenir.
+
+Yerelde:
+```bash
+pip install pyinstaller pillow pypdf requests websocket-client
+pyinstaller packaging/uyap_evrak.spec          # dist/UYAPEvrak/ (UYAPEvrak + UYAPEvrakKonsol)
+iscc packaging/windows/uyap_evrak.iss          # Windows kurulum dosyası (Inno Setup 6)
+bash packaging/linux/build_linux.sh            # AppImage + deb + rpm (fpm gerekir)
+bash packaging/macos/build_macos.sh            # dmg
+```
+Gömülü Java için `dist/UYAPEvrak/runtime/jre` klasörüne bir JRE 17 kopyalayın (CI bunu Eclipse Temurin ile yapar).
+
+| Dosya | Görev |
+|---|---|
+| `uygulama.py` | Tek giriş noktası (arayüz, `--pdf`, `--cli`, `--donustur`, `--sag-tik-kur` …) |
+| `katalog_gui.py`, `gui_ekler.py` | Arayüz, menüler, görüntüleyici, kılavuz, bildirimler |
+| `evrak_katalog.py` | Katalog (SQLite), filtre motoru, tarama, indirme, önbellek, mükerrer kontrolü |
+| `evrak_turleri.py` | Gerçek UYAP evrak türlerinden çıkarılmış kategori kuralları |
+| `donusturucu.py`, `sag_tik.py` | PDF dönüştürme ve sağ tık menüsü |
+| `uyap_indirici.py` | Tarayıcı köprüsü (CDP), e-İmza/Mobil İmza girişi, eski CLI modları |
+
+---
+
+## 📜 Önceki sürümlerin özellikleri (komut satırı modları)
 
 1. **Dava Dosyalarından Akıllı Evrak Filtreleme (700+ Açık ve Kapalı Dosya):**
    * UYAP'taki 27 yargı birimini tarar; İcra dairelerini otomatik ayıklayarak hız kazandırır.
@@ -283,4 +399,6 @@ UYAP_Indirilenler /
 
 ## 📄 Lisans
 
-Bu proje MIT Lisansı ile lisanslanmıştır.
+© 2026 Av. Can KIZILYAR. **Tüm hakları saklıdır.** Yazılı izin olmadan çoğaltılamaz, değiştirilemez, dağıtılamaz ve ticari amaçla kullanılamaz. Ayrıntılar ve üçüncü taraf bileşen lisansları: [LICENSE](LICENSE).
+
+Bu yazılım Adalet Bakanlığı'nın veya UYAP'ın resmi bir ürünü değildir.

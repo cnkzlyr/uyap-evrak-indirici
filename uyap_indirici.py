@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır. / All rights reserved.
 """
 UYAP Avukat Portal - Güvenli, Kategorili Toplu Evrak & İşlem İndirici
 ---------------------------------------------------------------------
@@ -63,8 +64,11 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Dizin ve Yapılandırma Sabitleri
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-if Path("/sdcard/Download").exists():
+# Paketlenmiş uygulamada yazılabilir veri klasörü UYAP_VERI_DIZINI ile verilir
+BASE_DIR = Path(os.environ.get("UYAP_VERI_DIZINI") or Path(__file__).resolve().parent)
+if os.environ.get("UYAP_INDIRME_DIZINI"):
+    DEFAULT_DOWNLOAD_DIR = Path(os.environ["UYAP_INDIRME_DIZINI"])
+elif Path("/sdcard/Download").exists():
     DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
 elif (BASE_DIR.parent / "UYAP_Indirilenler").exists():
     DEFAULT_DOWNLOAD_DIR = (BASE_DIR.parent / "UYAP_Indirilenler").resolve()
@@ -310,6 +314,14 @@ def matches_evrak_filter(tur_name: str, filter_type: str) -> bool:
 
 def auto_convert_udf_to_pdf(target_path: Path):
     """Eğer indirilen dosya .udf ise Havelsan motoruyla aynı adda .pdf kopyasını oluşturur."""
+    try:
+        import donusturucu  # paketle gelen JRE/yazı tiplerini ve UYAP Editör kurulumunu da bulur
+        p = Path(target_path)
+        if p.suffix.lower() == ".udf" and not p.with_suffix(".pdf").exists():
+            donusturucu.udf_to_pdf(p, timeout=60)
+        return
+    except ImportError:
+        pass
     try:
         p = Path(target_path)
         if not p.exists() or p.suffix.lower() != ".udf":
@@ -1829,23 +1841,33 @@ class UyapBrowserBridge:
         """
         return self.eval_js(js, timeout=30.0) or []
 
-    def download_document(self, params: dict) -> dict:
-        """download_document_brd.uyap üzerinden tek bir evrakı indirir ve base64 olarak döndürür."""
+    def download_document(self, params: dict, timeout_s: float = 40.0) -> dict:
+        """download_document_brd.uyap üzerinden tek bir evrakı indirir ve base64 olarak döndürür.
+        İstek timeout_s saniyede yanıt vermezse tarayıcı içinde iptal edilir ({"ok": False, "timeout": True});
+        böylece takılan bir indirme programı dakikalarca bekletmez, üst katman yeniden dener."""
         qs = urlencode({k: v for k, v in params.items() if v is not None and v != ""})
         url = f"/download_document_brd.uyap?{qs}"
         js = f"""
         (async () => {{
-            const resp = await fetch({json.dumps(url)}, {{
-                method: "GET",
-                headers: {{
-                    "Cache-Control": "no-cache",
-                    "Pragma": "no-cache"
-                }}
-            }});
+            const ctl = new AbortController();
+            const timer = setTimeout(() => ctl.abort(), {int(timeout_s * 1000)});
+            let resp;
+            try {{
+                resp = await fetch({json.dumps(url)}, {{
+                    method: "GET", signal: ctl.signal,
+                    headers: {{"Cache-Control": "no-cache", "Pragma": "no-cache"}}
+                }});
+            }} catch (e) {{
+                clearTimeout(timer);
+                return {{status: 0, ok: false, timeout: e && e.name === "AbortError", error: String(e)}};
+            }}
             const errHeader = resp.headers.get("error-code");
             const ct = resp.headers.get("content-type") || "";
             const cd = resp.headers.get("content-disposition") || "";
-            const buf = await resp.arrayBuffer();
+            let buf;
+            try {{ buf = await resp.arrayBuffer(); }}
+            catch (e) {{ clearTimeout(timer); return {{status: resp.status, ok: false, timeout: e && e.name === "AbortError", error: String(e)}}; }}
+            clearTimeout(timer);
             const bytes = new Uint8Array(buf);
             let binary = "";
             const chunkSize = 0x8000;
@@ -1864,7 +1886,11 @@ class UyapBrowserBridge:
             }};
         }})()
         """
-        return self.eval_js(js, timeout=90.0) or {}
+        try:
+            return self.eval_js(js, timeout=timeout_s + 20, retries=0) or {}
+        except Exception as e:  # CDP / tarayıcı sorunu: üst katman yeniden dener
+            file_logger.warning("download_document CDP hatası: %s", e)
+            return {"status": 0, "ok": False, "error": f"CDP: {e}"}
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Av. Can Kızılyar - naps-uyap-thunar-tools & udemobile motorlarından uyarlanmıştır.
  * TrueType Font Gömme (Embedded Times New Roman, Arial vb.) desteklidir.
  */
+/*
+ * UYAP Evrak Yöneticisi - UDF -> PDF dönüştürücü
+ * Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır.
+ */
 public class UdfBatchPdfConverter {
 
     private static final PrintStream CONSOLE = System.out;
@@ -115,6 +119,20 @@ public class UdfBatchPdfConverter {
             regDir.invoke(cObj, "/data/data/com.termux/files/home/.fonts");
             regDir.invoke(cObj, "/system/fonts");
             regDir.invoke(cObj, "/data/data/com.termux/files/usr/share/fonts");
+
+            // Paketle gelen / kullanıcının belirttiği font dizinleri (UYAP_FONT_DIR, ';' veya ':' ile ayrılmış)
+            String extra = System.getenv("UYAP_FONT_DIR");
+            if (extra != null) {
+                for (String dir : extra.split(java.util.regex.Pattern.quote(File.pathSeparator))) {
+                    if (!dir.trim().isEmpty() && new File(dir.trim()).isDirectory()) regDir.invoke(cObj, dir.trim());
+                }
+            }
+            // Linux / macOS sistem fontları
+            String home = System.getProperty("user.home", "");
+            for (String dir : new String[]{"/usr/share/fonts", "/usr/local/share/fonts", home + "/.fonts",
+                    home + "/.local/share/fonts", "/Library/Fonts", "/System/Library/Fonts", home + "/Library/Fonts"}) {
+                if (new File(dir).isDirectory()) regDir.invoke(cObj, dir);
+            }
 
             // Windows Font Dizinleri (Times New Roman, Arial, Calibri, vs.)
             String winDir = System.getenv("WINDIR");
@@ -260,7 +278,12 @@ public class UdfBatchPdfConverter {
             Class<?> cClass = Class.forName("tr.com.havelsan.uyap.system.editor.b.c");
             Method regDir = cClass.getMethod("a", String.class);
 
+            String extraDirs = System.getenv("UYAP_FONT_DIR");
+            String homeDir = System.getProperty("user.home", "");
             String[] fontDirs = {
+                extraDirs != null ? extraDirs.split(java.util.regex.Pattern.quote(File.pathSeparator))[0] : "",
+                "/usr/share/fonts", "/usr/local/share/fonts", homeDir + "/.fonts", homeDir + "/.local/share/fonts",
+                "/Library/Fonts", "/System/Library/Fonts", homeDir + "/Library/Fonts",
                 "/data/data/com.termux/files/home/.fonts/microsoft",
                 "/data/data/com.termux/files/home/.fonts",
                 "/system/fonts",

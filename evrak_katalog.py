@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır. / All rights reserved.
 """
 UYAP Evrak Kataloğu
 -------------------
@@ -36,8 +37,29 @@ import time
 import zipfile
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-KATALOG_DB = BASE_DIR / "uyap_katalog.db"
+import logging
+import shutil
+import sys
+from logging.handlers import RotatingFileHandler
+
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("UYAP_VERI_DIZINI") or BASE_DIR)
+KATALOG_DB = DATA_DIR / "uyap_katalog.db"
+CACHE_DIR = DATA_DIR / ".onbellek"
+LOG_DIR = DATA_DIR / "loglar"
+
+# Ayrıntılı (verbose) günlük: ekranda görünmeyen bağlantı/oturum/deneme ayrıntıları da buraya yazılır.
+klog = logging.getLogger("uyap.katalog")
+if not klog.handlers:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _h = RotatingFileHandler(LOG_DIR / "katalog.log", maxBytes=5 * 1024 * 1024, backupCount=10, encoding="utf-8")
+        _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(threadName)s: %(message)s"))
+        klog.addHandler(_h)
+    except OSError:
+        pass
+    klog.setLevel(logging.DEBUG)
+    klog.propagate = False
 
 # ---------------------------------------------------------------------------
 # Metin yardımcıları
@@ -156,6 +178,9 @@ class Katalog:
         if "tarama" not in cols:  # eski kataloglar için şema güncellemesi
             self.db.execute("ALTER TABLE dosya ADD COLUMN tarama TEXT")
             self.db.execute("UPDATE dosya SET tarama='tamam' WHERE evrak_sayisi > 0")
+        ecols = {r[1] for r in self.db.execute("PRAGMA table_info(evrak)")}
+        if "cache_path" not in ecols:
+            self.db.execute("ALTER TABLE evrak ADD COLUMN cache_path TEXT")
         self.db.commit()
         if self.db.execute("PRAGMA user_version").fetchone()[0] < KATALOG_SURUMU:
             self.reclassify()
@@ -804,7 +829,8 @@ class Motor:
         self.kat = katalog
         self.download_dir = Path(download_dir)
         self.base = self.download_dir / "DAVA_EVRAKLARI"
-        self.log = log
+        self._ui_log = log
+        self.dbg = klog.debug
         self.progress = progress or (lambda done, total, text="": None)
         self.stop_flag = threading.Event()
         self.pause_flag = threading.Event()
@@ -812,6 +838,14 @@ class Motor:
         self.case_ids: dict[str, str] = {}
         self.relogin = None  # () -> bool ; GUI/CLI tarafından atanır
         self.min_d, self.max_d, self.batch_n, self.batch_pause = 0.6, 1.2, 30, 6.0
+
+    def log(self, msg: str):
+        """Hem ekrana hem ayrıntılı günlük dosyasına (loglar/katalog.log) yazar."""
+        klog.info(msg)
+        try:
+            self._ui_log(msg)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ yardımcılar
     def _new_session(self):
@@ -1027,6 +1061,7 @@ class Motor:
             return True
 
     def _relogin(self) -> bool:
+        klog.warning("Oturum yenileme başlatıldı")
         self.log("[!] UYAP oturumu düştü, yeniden giriş deneniyor...")
         ok = bool(self.relogin and self.relogin())
         if ok:
@@ -1036,10 +1071,141 @@ class Motor:
             self.log("[x] Oturum yenilenemedi; işlem durduruldu.")
         return ok
 
-    def download(self, ids: list[int]) -> dict:
-        from uyap_indirici import is_valid_document_bytes, guess_extension
+    # ------------------------------------------------------------------ tek evrakı UYAP'tan çek (indirme + önizleme ortak)
+    def _ensure_row_fresh(self, eid: int, refreshed: set | None = None):
+        """Evrakın şifreli kimlikleri bu oturuma ait değilse dosyanın evrak listesini tazeler."""
+        row = self.kat.get(eid)
+        if not row:
+            return None
+        if row["oturum"] == self.oturum:
+            return row
+        dk = row["dkey"]
+        if refreshed is not None and dk in refreshed:
+            return row
+        if refreshed is not None:
+            refreshed.add(dk)
+        t0 = time.time()
+        ok = self._refresh_case(dk)
+        self.dbg("Dosya kimlikleri tazelendi: %s -> %s (%.1fs)", dk, ok, time.time() - t0)
+        if not ok and self._session_dead() and self._relogin():
+            ok = self._refresh_case(dk)
+        return self.kat.get(eid)
+
+    def fetch(self, eid: int, refreshed: set | None = None) -> tuple:
+        """(raw_bytes | None, resp, row, neden). Oturum düşerse yeniden giriş yapar; takılan isteği
+        zaman aşımıyla keser ve en fazla 5 kez dener. Bozuk/HTML yanıt asla geçerli sayılmaz."""
+        from uyap_indirici import is_valid_document_bytes
         import base64
-        stats = {"indirildi": 0, "mukerrer": 0, "yok": 0, "hata": 0, "atlandi": 0}
+        if not self.oturum:
+            self._new_session()
+        row = self._ensure_row_fresh(eid, refreshed)
+        if not row:
+            return None, {}, None, "kayıt yok"
+        if row["oturum"] != self.oturum:
+            return None, {}, row, "UYAP listesinde artık yok"
+        resp, reason = {}, ""
+        for attempt in range(1, 6):
+            if self.stop_flag.is_set():
+                return None, resp, row, "durduruldu"
+            cid = self.case_ids.get(row["dkey"]) or row["case_dosya_id"]
+            t0 = time.time()
+            resp = self.bridge.download_document({"dosyaId": cid, "evrakId": row["evrak_id"]}, timeout_s=40.0) or {}
+            raw = base64.b64decode(resp.get("base64") or "") if resp.get("base64") else b""
+            ok, reason = is_valid_document_bytes(raw, resp.get("contentType") or "")
+            self.dbg("İndirme denemesi %d id=%s durum=%s boyut=%d ct=%s süre=%.1fs geçerli=%s neden=%s hata=%s",
+                     attempt, eid, resp.get("status"), len(raw), resp.get("contentType"), time.time() - t0, ok,
+                     reason, resp.get("error") or resp.get("errorHeader"))
+            if ok:
+                return raw, resp, row, ""
+            if resp.get("timeout"):
+                self.log(f"[!] UYAP 40 sn içinde yanıt vermedi ({str(row['tur'])[:40]}); yeniden deneniyor ({attempt}/5)...")
+                self._sleep(3.0 * attempt)
+                continue
+            if self._session_dead():
+                self.log("[!] Bağlantı/oturum koptu; yeniden giriş yapılıp aynı evrak tekrar denenecek.")
+                if not self._relogin():
+                    self.stop_flag.set()
+                    return None, resp, row, "oturum yenilenemedi"
+                self._refresh_case(row["dkey"])
+                row = self.kat.get(eid)
+                continue
+            if resp.get("ok") and "html" not in (resp.get("contentType") or "").lower():
+                return None, resp, row, "yok"  # UYAP'ta fiziksel dosya yok
+            self._sleep(2.0 * attempt)
+        return None, resp, row, reason or "yanıt alınamadı"
+
+    @staticmethod
+    def _ext_of(resp: dict, raw: bytes) -> str:
+        from uyap_indirici import guess_extension
+        cd = resp.get("contentDisposition") or ""
+        m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^;"\']+)', cd, re.I)
+        ext = guess_extension(m.group(1) if m else "", resp.get("contentType") or "", raw)
+        return ext if ext.startswith(".") else f".{ext}"
+
+    def fetch_to_cache(self, eid: int) -> Path | None:
+        """Önizleme: evrakı indirme klasörüne değil önbelleğe alır (PDF'i de üretilir) ve açılacak yolu döner."""
+        row = self.kat.get(eid)
+        if row and row["path"] and os.path.exists(row["path"]):
+            return Path(row["pdf_path"] if row["pdf_path"] and os.path.exists(row["pdf_path"]) else row["path"])
+        if row and row["cache_path"] and os.path.exists(row["cache_path"]):
+            cp = Path(row["cache_path"])
+            return cp.with_suffix(".pdf") if cp.with_suffix(".pdf").exists() else cp
+        raw, resp, row, why = self.fetch(eid)
+        if raw is None:
+            self.log(f"[x] Önizleme alınamadı: {why}")
+            return None
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = CACHE_DIR / f"{eid}_{safe_part(strip_ext(row['tur']), 50)}{self._ext_of(resp, raw)}"
+        p.write_bytes(raw)
+        self.kat.set_result(eid, cache_path=str(p))
+        self.log(f"[✓] Önbelleğe alındı (indirirken buradan taşınacak): {p.name}")
+        try:
+            import donusturucu as dn
+            _st, pdf, _m = dn.convert(p)
+            if pdf:
+                return pdf
+        except Exception as e:
+            self.dbg("Önbellek PDF dönüşümü başarısız: %s", e)
+        return p
+
+    # ------------------------------------------------------------------ PDF dönüşümü (arka plan)
+    def _conv_worker(self):
+        import donusturucu as dn
+        while True:
+            fo = self._conv_q.get()
+            try:
+                t0 = time.time()
+                udfs = [f for f in Path(fo).glob("*.udf") if not f.with_suffix(".pdf").exists()]
+                if udfs:
+                    dn.udf_to_pdf(Path(fo), timeout=90 + 15 * len(udfs))
+                done = [f for f in udfs if f.with_suffix(".pdf").exists()]
+                for f in done:
+                    self.log(f"[pdf] PDF'e çevrildi: {f.with_suffix('.pdf').name}")
+                if len(done) < len(udfs):
+                    ok, why = dn.udf_hazir_mi()
+                    self.log(f"[!] {len(udfs) - len(done)} UDF PDF'e çevrilemedi ({Path(fo).name})"
+                             + (f": {why}" if not ok else "."))
+                if done:
+                    with self.kat.db:
+                        for f in done:
+                            self.kat.db.execute("UPDATE evrak SET pdf_path=? WHERE path=?",
+                                                (str(f.with_suffix(".pdf")), str(f)))
+                self.dbg("Klasör dönüşümü %s: %d/%d (%.1fs)", fo, len(done), len(udfs), time.time() - t0)
+            except Exception as e:
+                klog.exception("PDF dönüşüm hatası %s: %s", fo, e)
+            finally:
+                self._conv_q.task_done()
+
+    def _queue_conversion(self, folder: Path):
+        import queue as _q
+        if getattr(self, "_conv_q", None) is None:
+            self._conv_q = _q.Queue()
+            threading.Thread(target=self._conv_worker, daemon=True, name="pdf-donusum").start()
+        self._conv_q.put(str(folder))
+
+    # ------------------------------------------------------------------ indirme
+    def download(self, ids: list[int]) -> dict:
+        stats = {"indirildi": 0, "mukerrer": 0, "yok": 0, "hata": 0, "atlandi": 0, "onbellek": 0}
         n_gone = self.kat.sync_disk()
         if n_gone:
             self.log(f"[i] Diskte bulunamayan {n_gone} evrak yeniden indirilecek olarak işaretlendi.")
@@ -1048,122 +1214,112 @@ class Motor:
         if not self.oturum:
             self._new_session()
         total = len(ids)
-        # dosya bazında grupla (sıralı geldiği varsayılır)
-        groups: list[tuple[str, list[int]]] = []
+        t_start, done, since_pause, bytes_total = time.time(), 0, 0, 0
+        refreshed: set = set()
+        pending_folders: set = set()
+        last_dkey = None
+        self.log(f"[*] {total} evrak indirilecek ({self.min_d}-{self.max_d} sn bekleme, "
+                 f"her {self.batch_n} evrakta {self.batch_pause:.0f} sn mola). Takılan istek 40 sn'de kesilir.")
         for eid in ids:
-            r = self.kat.db.execute("SELECT dkey FROM evrak WHERE id=?", (eid,)).fetchone()
-            if not r:
-                continue
-            if groups and groups[-1][0] == r[0]:
-                groups[-1][1].append(eid)
-            else:
-                groups.append((r[0], [eid]))
-        done = 0
-        since_pause = 0
-        self.log(f"[*] {total} evrak, {len(groups)} dosya için indirme başlıyor "
-                 f"({self.min_d}-{self.max_d} sn bekleme, her {self.batch_n} dosyada {self.batch_pause:.0f} sn mola)")
-        for dkey, eids in groups:
             if self.stop_flag.is_set():
                 break
-            folders = set()
-            refreshed: set = set()
-            for eid in eids:
-                if self.stop_flag.is_set():
+            done += 1
+            row = self.kat.get(eid)
+            if not row or row["durum"] in ("indirildi", "mukerrer"):
+                stats["atlandi"] += 1
+                continue
+            if last_dkey and row["dkey"] != last_dkey:  # dosya değişti: önceki klasörleri arka planda PDF'e çevir
+                for fo in pending_folders:
+                    self._queue_conversion(fo)
+                pending_folders.clear()
+            last_dkey = row["dkey"]
+            from_cache = bool(row["cache_path"] and os.path.exists(row["cache_path"]))
+            if from_cache:
+                raw, resp, why = Path(row["cache_path"]).read_bytes(), {}, ""
+                ext = Path(row["cache_path"]).suffix
+            else:
+                raw, resp, row2, why = self.fetch(eid, refreshed)
+                row = row2 or row
+                ext = self._ext_of(resp, raw) if raw is not None else ""
+            if raw is None:
+                if self.stop_flag.is_set() and why in ("durduruldu", "oturum yenilenemedi"):
                     break
-                done += 1
-                row = self.kat.get(eid)
-                if not row or row["durum"] in ("indirildi", "mukerrer"):
-                    stats["atlandi"] += 1
-                    continue
-                if row["oturum"] != self.oturum and row["dkey"] not in refreshed:
-                    refreshed.add(row["dkey"])
-                    if not self._refresh_case(row["dkey"]):
-                        if not (self._session_dead() and self._relogin() and self._refresh_case(row["dkey"])):
-                            self.log(f"[!] {row['birim']} {row['dosya_no']}: dosya UYAP listesinde bulunamadı, atlandı.")
-                            stats["hata"] += 1
-                            continue
-                    row = self.kat.get(eid)
-                if row["oturum"] != self.oturum:
-                    stats["yok"] += 1
-                    self.kat.set_result(eid, hata="UYAP listesinde artık yok")
-                    continue
-                dkey = row["dkey"]
-                cid = self.case_ids.get(dkey) or row["case_dosya_id"]
-                resp, raw, ok = {}, b"", False
-                for attempt in range(1, 6):
-                    resp = self.bridge.download_document({"dosyaId": cid, "evrakId": row["evrak_id"]}) or {}
-                    raw = base64.b64decode(resp.get("base64") or "") if resp.get("base64") else b""
-                    ok, reason = is_valid_document_bytes(raw, resp.get("contentType") or "")
-                    if ok:
-                        break
-                    if self._session_dead():
-                        if not self._relogin():
-                            self.stop_flag.set()
-                            break
-                        self._refresh_case(dkey)
-                        row = self.kat.get(eid)
-                        cid = self.case_ids.get(dkey) or cid
-                        continue
-                    if resp.get("ok") and "html" not in (resp.get("contentType") or "").lower():
-                        break  # UYAP'ta fiziksel dosya yok
-                    self._sleep(2.0 * attempt)
-                if not ok:
-                    if self.stop_flag.is_set():
-                        break
-                    st = "yok" if resp.get("ok") else "hata"
-                    stats[st] += 1
-                    self.kat.set_result(eid, durum=st, hata=str(resp.get("errorHeader") or resp.get("status") or "")[:200])
-                    self.log(f"[-] {row['tur']} ({row['birim']} {row['dosya_no']}): dosya alınamadı ({st}).")
-                    continue
+                st = "yok" if why == "yok" else "hata"
+                stats[st] += 1
+                if why == "UYAP listesinde artık yok":
+                    self.kat.set_result(eid, hata=why)
+                else:
+                    self.kat.set_result(eid, durum=st, hata=why[:200])
+                self.log(f"[-] {row['tur']} ({row['birim']} {row['dosya_no']}): alınamadı — {why}")
+            else:
                 sha = content_fingerprint(raw)
                 dup = self.kat.find_sha(sha)
                 if dup and dup["path"] and os.path.exists(dup["path"]):
                     stats["mukerrer"] += 1
                     self.kat.set_result(eid, durum="mukerrer", dup_of=dup["skey"], sha256=sha, size=len(raw),
                                         path=dup["path"], indirildi=dt.datetime.now().isoformat(timespec="seconds"))
-                    self.log(f"[=] Mükerrer (aynı içerik zaten var): {row['tur']} -> {Path(dup['path']).name}")
+                    self.log(f"[=] Mükerrer (aynı içerik zaten var, kaydedilmedi): {row['tur']} → {Path(dup['path']).name}")
                 else:
-                    cd = resp.get("contentDisposition") or ""
-                    m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^;"\']+)', cd, re.I)
-                    ext = guess_extension(m.group(1) if m else "", resp.get("contentType") or "", raw)
-                    ext = ext if ext.startswith(".") else f".{ext}"
                     path = unique_path(target_path_for(row, self.base, ext))
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = path.with_name(path.name + ".part")
-                    tmp.write_bytes(raw)
-                    tmp.replace(path)
-                    folders.add(path.parent)
-                    pdf = None
-                    if ext.lower() in (".tif", ".tiff"):
+                    if from_cache:
+                        cpdf = Path(row["cache_path"]).with_suffix(".pdf")
+                        shutil.move(row["cache_path"], path)
+                        if cpdf.exists():
+                            shutil.move(str(cpdf), str(path.with_suffix(".pdf")))
+                        stats["onbellek"] += 1
+                    else:
+                        tmp = path.with_name(path.name + ".part")
+                        tmp.write_bytes(raw)
+                        tmp.replace(path)
+                    pending_folders.add(path.parent)
+                    pdf = path.with_suffix(".pdf") if path.with_suffix(".pdf").exists() else None
+                    if ext.lower() in (".tif", ".tiff") and not pdf:
                         pdf = tiff_to_pdf(path)
+                        if pdf:
+                            self.log(f"[pdf] TIF → A4 PDF: {pdf.name}")
                     elif ext.lower() == ".pdf":
                         pdf = path
                     self.kat.set_result(eid, durum="indirildi", path=str(path), pdf_path=str(pdf) if pdf else None,
                                         sha256=sha, size=len(raw), uzanti=ext.lstrip(".").lower(), hata=None,
-                                        indirildi=dt.datetime.now().isoformat(timespec="seconds"))
+                                        cache_path=None, indirildi=dt.datetime.now().isoformat(timespec="seconds"))
                     self.kat.set_text(eid, extract_text(path, raw))
                     stats["indirildi"] += 1
                     since_pause += 1
-                    self.log(f"[{done}/{total}] {len(raw)//1024} KB  {row['birim']} ({row['dosya_no']})  {path.name}")
-                self.progress(done, total, f"{stats['indirildi']} indirildi, {stats['mukerrer']} mükerrer")
-                if since_pause and since_pause % self.batch_n == 0:
-                    since_pause = 0
-                    self._sleep(self.batch_pause)
-                else:
-                    self._sleep(random.uniform(self.min_d, self.max_d))
-            # Dosya grubu bitti: UDF -> PDF (tek JVM)
-            for fo in folders:
-                udf_folder_to_pdf(fo)
-                with self.kat.db:
-                    for r in self.kat.db.execute(
-                            "SELECT id, path FROM evrak WHERE pdf_path IS NULL AND path LIKE ? AND path LIKE '%.udf'",
-                            (str(fo) + os.sep + "%",)).fetchall():
-                        pdf = Path(r["path"]).with_suffix(".pdf")
-                        if pdf.exists():
-                            self.kat.db.execute("UPDATE evrak SET pdf_path=? WHERE id=?", (str(pdf), r["id"]))
-        self.log(f"[✓] Bitti: {stats['indirildi']} indirildi, {stats['mukerrer']} mükerrer (kaydedilmedi), "
+                    bytes_total += len(raw)
+                    self.log(f"[{done}/{total}] {len(raw)//1024} KB{' (önbellekten)' if from_cache else ''}  "
+                             f"{row['birim']} ({row['dosya_no']})  →  {path.name}")
+            el = time.time() - t_start
+            rate = done / el if el > 0 else 0
+            kalan = (total - done) / rate if rate > 0 else 0
+            self.progress(done, total, f"%{done * 100 / total:.1f} · {stats['indirildi']} indirildi · "
+                                       f"{stats['mukerrer']} mükerrer · {stats['hata']} hata · "
+                                       f"kalan ~{_sure(kalan)} · {bytes_total / 1048576:.1f} MB")
+            if from_cache:
+                continue
+            if since_pause and since_pause % self.batch_n == 0:
+                since_pause = 0
+                self._sleep(self.batch_pause)
+            else:
+                self._sleep(random.uniform(self.min_d, self.max_d))
+        for fo in pending_folders:
+            self._queue_conversion(fo)
+        if getattr(self, "_conv_q", None) is not None and self._conv_q.unfinished_tasks:
+            self.log("[*] Kalan UDF'ler PDF'e çevriliyor...")
+            self._conv_q.join()
+        self.log(f"[✓] Bitti ({_sure(time.time() - t_start)}): {stats['indirildi']} indirildi "
+                 f"({stats['onbellek']} önbellekten), {stats['mukerrer']} mükerrer (kaydedilmedi), "
                  f"{stats['yok']} UYAP'ta dosyası yok, {stats['hata']} hata, {stats['atlandi']} zaten vardı.")
         return stats
+
+
+def _sure(sn: float) -> str:
+    sn = int(max(0, sn))
+    if sn < 60:
+        return f"{sn} sn"
+    if sn < 3600:
+        return f"{sn // 60} dk {sn % 60:02d} sn"
+    return f"{sn // 3600} sa {(sn % 3600) // 60:02d} dk"
 
 
 def export_csv(katalog: Katalog, f: dict, path: Path) -> int:

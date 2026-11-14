@@ -1,4 +1,5 @@
 @echo off
+rem Copyright (c) 2026 Av. Can KIZILYAR. Tum haklari saklidir.
 chcp 65001 >nul
 title UYAP Avukat Portal Evrak Indirici - Windows 11
 color 0B
@@ -9,6 +10,7 @@ cd /d "%~dp0"
 cls
 echo ==================================================================
 echo    UYAP Avukat Portal Evrak Indirici - Windows 11
+echo    (c) 2026 Av. Can KIZILYAR - Tum haklari saklidir
 echo ==================================================================
 echo.
 echo   1. Islemlerim Indirici [Son 1 Yil - Hizli]

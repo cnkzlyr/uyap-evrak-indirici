@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır. / All rights reserved.
 """
 UYAP Evrak Zenginleştirme ve Akıllı Yeniden Adlandırma Motoru
 ============================================================
@@ -30,7 +31,8 @@ import datetime as dt
 from pathlib import Path
 from collections import defaultdict
 
-BASE_DIR = Path(__file__).resolve().parent
+# Paketlenmiş uygulamada yazılabilir veri klasörü UYAP_VERI_DIZINI ile verilir
+BASE_DIR = Path(os.environ.get("UYAP_VERI_DIZINI") or Path(__file__).resolve().parent)
 if Path("/sdcard/Download/UYAP_Indirilenler").exists():
     DEFAULT_DOWNLOAD_DIR = Path("/sdcard/Download/UYAP_Indirilenler")
 elif (BASE_DIR.parent / "UYAP_Indirilenler").exists():
@@ -254,6 +256,7 @@ def extract_meta_from_udf(udf_path: Path) -> dict:
                             break
 
                 # 9. Tebligat / Mazbata ve UETS Bilgileri
+                t_lower = tr_lower(xml_text)
                 is_uets = (
                     "uets" in t_lower
                     or "elektronik tebligat" in t_lower

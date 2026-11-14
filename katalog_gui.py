@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır. / All rights reserved.
 """
-UYAP Evrak Kataloğu - Filtreleyerek Seçip İndirme Arayüzü
-----------------------------------------------------------
+UYAP Evrak Yöneticisi - Katalog, filtreli indirme ve görüntüleyici
+Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır.
+------------------------------------------------------------------
 1) "Bağlan"   : Tarayıcıyı arka planda (görünmez) açar; oturum yoksa e-İmza veya Mobil İmza ile girer.
 2) "UYAP'ı Tara": Tüm dosyaların evrak + ek listesini kataloğa yazar (indirmeden).
 3) Filtrele   : taraf, müvekkil, açıklama, içerik, tarih aralığı / son N gün, birim, dosya no,
@@ -22,6 +24,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
@@ -29,6 +32,7 @@ from tkinter import ttk, messagebox, filedialog
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import evrak_katalog as ek  # noqa: E402
+import gui_ekler as ge  # noqa: E402
 
 ROW_LIMIT = 1000
 
@@ -215,13 +219,22 @@ class KatalogApp:
         import uyap_indirici as ui
         self.ui = ui
         self.root = root
-        root.title("UYAP Evrak Kataloğu — Filtrele, Seç, Bir Kez İndir")
-        root.geometry("1400x860")
-        root.minsize(1100, 680)
+        root.title(f"{ge.UYGULAMA_ADI} {ge.SURUM} — Av. Can KIZILYAR")
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f"{int(sw * 0.9)}x{int(sh * 0.86)}+{int(sw * 0.04)}+{int(sh * 0.03)}")
+        try:  # pencere / görev çubuğu simgesi
+            base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+            self._icon = tk.PhotoImage(file=str(base / "assets" / "uyap_evrak_256.png"))
+            root.iconphoto(True, self._icon)
+        except Exception:
+            pass
+        root.minsize(min(760, sw), min(520, sh))
         self.kat = ek.Katalog()
         self.bridge = ui.UyapBrowserBridge(port=ui.CDP_PORT)
         self.download_dir = Path(ui.DEFAULT_DOWNLOAD_DIR)
-        self.motor = ek.Motor(self.bridge, self.kat, self.download_dir, log=self.log, progress=self.on_progress)
+        self.motor = ek.Motor(self.bridge, self.kat, self.download_dir, log=self._ui_log, progress=self.on_progress)
+        self._last_progress = 0.0
+        self._prog_text = ""
         self.motor.relogin = self._relogin_worker
         self.ui_q: queue.Queue = queue.Queue()
         self.work_q: queue.Queue = queue.Queue()
@@ -241,19 +254,31 @@ class KatalogApp:
 
     # ------------------------------------------------------------------ arayüz
     def _build(self):
-        st = ttk.Style()
-        try:
-            st.theme_use("vista" if os.name == "nt" else "clam")
-        except tk.TclError:
-            pass
+        ge.stil_uygula(self.root)
+        self._build_menu()
+        head = ttk.Frame(self.root, style="Baslik.TFrame", padding=(12, 6))
+        head.pack(fill="x")
+        ttk.Label(head, text=f"⚖  {ge.UYGULAMA_ADI}", style="Baslik.TLabel").pack(side="left")
+        ttk.Label(head, text=ge.IMZA, style="Imza.TLabel").pack(side="right")
+
         top = ttk.Frame(self.root, padding=(8, 6))
         top.pack(fill="x")
+        b = ttk.Button(top, text="☰", width=3, command=self.toggle_filters)
+        b.pack(side="left", padx=(0, 6))
+        ge.Ipucu(b, "Filtre panelini gizle / göster (Ctrl+B). Dar ekranlarda (ör. Android/Termux) kendiliğinden gizlenir.")
         self.lbl_session = ttk.Label(top, text="Oturum: bağlı değil", foreground="#a33")
         self.lbl_session.pack(side="left")
         self.var_headless = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="Tarayıcıyı gizli çalıştır", variable=self.var_headless).pack(side="left", padx=12)
-        ttk.Button(top, text="Bağlan / Giriş", command=self.on_connect).pack(side="left", padx=2)
-        ttk.Button(top, text="UYAP'ı Tara (katalog güncelle)", command=self.on_scan).pack(side="left", padx=2)
+        cb = ttk.Checkbutton(top, text="Tarayıcıyı gizli çalıştır", variable=self.var_headless)
+        cb.pack(side="left", padx=12)
+        ge.Ipucu(cb, "İşaretliyse UYAP için açılan Chrome/Edge penceresi görünmez (arka planda çalışır). "
+                     "Giriş e-İmza veya Mobil İmza ile otomatik yapılır.")
+        b = ttk.Button(top, text="Bağlan / Giriş", command=self.on_connect, style="Vurgu.TButton")
+        b.pack(side="left", padx=2)
+        ge.Ipucu(b, "Tarayıcıyı hazırlar, UYAP oturumunu kontrol eder; kapalıysa giriş yöntemini sorar.")
+        b = ttk.Button(top, text="UYAP'ı Tara", command=self.on_scan)
+        b.pack(side="left", padx=2)
+        ge.Ipucu(b, "Evrak LİSTESİNİ günceller (indirme yapmaz). Günlük kullanımda 'yalnızca açık dosyalar' yeterli.")
         self.btn_pause = ttk.Button(top, text="Duraklat", command=self.on_pause)
         self.btn_pause.pack(side="left", padx=2)
         ttk.Button(top, text="Durdur", command=self.on_stop).pack(side="left", padx=2)
@@ -264,11 +289,12 @@ class KatalogApp:
         prog.pack(fill="x")
         self.pbar = ttk.Progressbar(prog, mode="determinate")
         self.pbar.pack(side="left", fill="x", expand=True)
-        self.lbl_prog = ttk.Label(prog, text="", width=60)
+        self.lbl_prog = ttk.Label(prog, text="", width=95)
         self.lbl_prog.pack(side="left", padx=6)
 
         body = ttk.PanedWindow(self.root, orient="horizontal")
         body.pack(fill="both", expand=True, padx=8, pady=6)
+        self.body = body
 
         # ---- filtre paneli (kaydırılabilir)
         outer = ttk.Frame(body)
@@ -283,6 +309,8 @@ class KatalogApp:
         canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
                         if str(e.widget).startswith(str(fp)) or e.widget is canvas else None)
         body.add(outer, weight=0)
+        self.filter_outer = outer
+        self._filters_visible = True
         self._build_filters(fp)
 
         # ---- sonuçlar
@@ -301,8 +329,10 @@ class KatalogApp:
         cols = ("tarih", "birim", "dosya", "tip", "evrak", "aciklama", "kategori", "durum")
         heads = ("Tarih", "Birim", "Dosya No", "Asıl/Ek", "Evrak / Ek Adı", "Açıklama", "Kategori", "Durum")
         widths = (82, 210, 80, 60, 300, 230, 130, 120)
-        tf = ttk.Frame(right)
-        tf.pack(fill="both", expand=True, pady=(4, 0))
+        vpane = ttk.PanedWindow(right, orient="vertical")
+        vpane.pack(fill="both", expand=True, pady=(4, 0))
+        tf = ttk.Frame(vpane)
+        vpane.add(tf, weight=4)
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="extended")
         for c, h, w in zip(cols, heads, widths):
             self.tree.heading(c, text=h)
@@ -314,12 +344,51 @@ class KatalogApp:
         self.tree.tag_configure("indirildi", foreground="#1a7f37")
         self.tree.tag_configure("mukerrer", foreground="#888888")
         self.tree.tag_configure("ek", background="#f6f8fa")
+        self.tree.tag_configure("onbellek", foreground="#1f4e8c")
         self.tree.bind("<Double-1>", self.on_open_doc)
+        self.tree.bind("<Return>", self.on_open_doc)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._show_detail())
 
-        logf = ttk.LabelFrame(right, text="İşlem günlüğü", padding=2)
-        logf.pack(fill="x", pady=(6, 0))
-        self.txt_log = tk.Text(logf, height=9, wrap="none", font=("Consolas", 9))
-        self.txt_log.pack(fill="x")
+        # Ayrıntı paneli (görüntüleyici)
+        det = ttk.LabelFrame(vpane, text="Seçili evrak", padding=6, style="Ayrinti.TLabelframe")
+        vpane.add(det, weight=1)
+        self.lbl_detail = ttk.Label(det, text="Bir evrak seçin. Çift tık: aç (indirilmemişse önbelleğe alıp açar).",
+                                    justify="left", wraplength=900)
+        self.lbl_detail.pack(anchor="w", fill="x")
+        dbf = ttk.Frame(det)
+        dbf.pack(fill="x", pady=(4, 2))
+        for txt, cmd, tip in (
+                ("Aç", self.on_open_doc, "İndirilmişse PDF'ini (yoksa kendisini) açar; indirilmemişse önbelleğe alıp açar."),
+                ("Orijinal dosyayı aç", lambda: self.on_open_doc(orijinal=True), "PDF yerine UDF/TIF/EYP aslını açar."),
+                ("Klasörde göster", self.on_open_folder, "Dosyanın bulunduğu klasörü açar ve dosyayı seçer."),
+                ("Seçilileri indir", self.on_download_selected, "Seçili evrakları indirme klasörüne kaydeder."),
+                ("Asıl evrak + tüm eklerini seç", self.select_family, "Seçili evrakın asıl evrakını ve tüm eklerini listede seçer.")):
+            b = ttk.Button(dbf, text=txt, command=cmd)
+            b.pack(side="left", padx=2)
+            ge.Ipucu(b, tip)
+        self.lb_ekler = tk.Listbox(det, height=4, activestyle="none")
+        self.lb_ekler.pack(fill="both", expand=True)
+        self.lb_ekler.bind("<Double-Button-1>", self._open_family_item)
+        self._family_ids: list = []
+
+        logf = ttk.LabelFrame(vpane, text="İşlem günlüğü (tamamı loglar/katalog.log dosyasına da yazılır)", padding=2)
+        vpane.add(logf, weight=1)
+        self.txt_log = tk.Text(logf, height=7, wrap="none", font=("Consolas", 9))
+        lsb = ttk.Scrollbar(logf, orient="vertical", command=self.txt_log.yview)
+        self.txt_log.configure(yscrollcommand=lsb.set)
+        lsb.pack(side="right", fill="y")
+        self.txt_log.pack(fill="both", expand=True)
+        self.txt_log.tag_configure("hata", foreground="#a31515")
+        self.txt_log.tag_configure("ok", foreground="#1a7f37")
+        self.txt_log.tag_configure("pdf", foreground="#6b3fa0")
+
+        # Kısayollar
+        self.root.bind("<Control-b>", lambda e: self.toggle_filters())
+        self.root.bind("<F5>", lambda e: self.apply_filters())
+        self.root.bind("<Control-f>", lambda e: self._focus_search())
+        self.root.bind("<Control-o>", lambda e: self.on_open_folder())
+        self.root.bind("<Control-d>", lambda e: self.on_download_selected())
+        self.root.bind("<Configure>", self._on_resize, add="+")
 
     def _build_filters(self, fp: ttk.Frame):
         self.v = {}
@@ -331,7 +400,7 @@ class KatalogApp:
             ttk.Label(fp, text=title, font=("Segoe UI", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
             r += 1
             if hint:
-                ttk.Label(fp, text=hint, foreground="#777").grid(row=r, column=0, columnspan=3, sticky="w")
+                ttk.Label(fp, text=hint, foreground="#777", wraplength=340, justify="left").grid(row=r, column=0, columnspan=3, sticky="w")
                 r += 1
 
         def entry(label, key, width=30, combo=False):
@@ -358,10 +427,12 @@ class KatalogApp:
 
         ttk.Label(fp, text="Listelerde: 1. tık = getir (yeşil ✔), 2. tık = hariç tut (kırmızı ✖), 3. tık = kaldır.\n"
                            "Metinlerde: başına - koyulan kelime hariç tutulur (ör. ahmet -mehmet).",
-                  foreground="#1f4e8c", justify="left").grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+                  foreground="#1f4e8c", justify="left", wraplength=340).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
 
         sec("Metin arama (Türkçe harf duyarsız)")
-        entry("Taraf / kişi", "taraf")
+        self.ent_taraf = entry("Taraf / kişi", "taraf")
+        ge.Ipucu(self.ent_taraf, "Taraf adı, açıklamadaki kişi adları ve dosyanın taraf/vekil listesinde arar.\n"
+                                 "Örnek: sungur -ahmet  →  Sungur geçen, Ahmet geçmeyen.")
         self.cb_muv = entry("Müvekkil", "muvekkil", combo=True)
         self.v["sadece_muvekkilli"] = tk.BooleanVar(value=False)
         ttk.Checkbutton(fp, text="Yalnızca müvekkilim olan dosyalar", variable=self.v["sadece_muvekkilli"],
@@ -402,7 +473,8 @@ class KatalogApp:
         tri("dosya_tur", "Dosya türü", 6)
         tri("yargi", "Yargı", 4, labeler=lambda k: (k or "?").replace("_", " "))
         tri("dosya_durum", "Dosya durumu", 2, labeler=lambda k: k or "?")
-        tri("uzanti", "Dosya biçimi (uzantı)", 5, labeler=lambda k: k or "(belirsiz / çoğunlukla udf)")
+        tri("uzanti", "Dosya biçimi (uzantı)", 5, labeler=lambda k: k or "Henüz bilinmiyor (indirilince belli olur)",
+            hint="İndirilmemiş asıl evrakların biçimini UYAP önceden bildirmez (çoğu .udf'dir).")
 
         sec("Asıl evrak / ek")
         self.v["ek"] = tk.StringVar(value="hepsi")
@@ -477,12 +549,13 @@ class KatalogApp:
     def _show_results(self, n, rows):
         self.tree.delete(*self.tree.get_children())
         for r in rows:
-            tags = [r["durum"]] + (["ek"] if r["is_ek"] else [])
+            cached = bool(r["cache_path"]) and r["durum"] == "yeni"
+            tags = [r["durum"]] + (["ek"] if r["is_ek"] else []) + (["onbellek"] if cached else [])
             evrak = f"   ↳ EK{int(r['sira'] or 0):02d}: {r['tur']}" if r["is_ek"] else r["tur"]
             self.tree.insert("", "end", iid=str(r["id"]), tags=tags, values=(
                 r["tarih"], r["birim"] or "", r["dosya_no"] or "", "Ek" if r["is_ek"] else "Asıl", evrak,
                 r["aciklama"] or "", ek.KATEGORI_ADI.get(r["kategori"], r["kategori"]),
-                ek.DURUMLAR.get(r["durum"], r["durum"])))
+                ek.DURUMLAR.get(r["durum"], r["durum"]) + (" · önbellekte" if cached else "")))
         shown = f" (ilk {ROW_LIMIT} gösteriliyor)" if n > ROW_LIMIT else ""
         self.lbl_count.config(text=f"{n:,} evrak{shown}".replace(",", "."))
         self.btn_dl_all.config(text=f"Filtredekilerin tümünü indir ({n:,})".replace(",", "."))
@@ -514,7 +587,7 @@ class KatalogApp:
         self.schedule_filter(0)
 
     # ------------------------------------------------------------------ filtre durumunu sakla / yükle
-    STATE_FILE = Path(__file__).resolve().parent / ".katalog_filtre.json"
+    STATE_FILE = ek.DATA_DIR / ".katalog_filtre.json"
 
     def _save_state(self):
         try:
@@ -556,6 +629,12 @@ class KatalogApp:
 
     # ------------------------------------------------------------------ olaylar
     def log(self, msg: str):
+        """Arayüz mesajı: hem ekrana hem loglar/katalog.log dosyasına."""
+        ek.klog.info(msg)
+        self.ui_q.put(("log", msg))
+
+    def _ui_log(self, msg: str):
+        """Motor kendi günlüğünü dosyaya yazar; buradan yalnızca ekrana gider."""
         self.ui_q.put(("log", msg))
 
     def on_progress(self, done, total, text=""):
@@ -567,14 +646,19 @@ class KatalogApp:
                 m = self.ui_q.get_nowait()
                 kind = m[0]
                 if kind == "log":
-                    self.txt_log.insert("end", m[1] + "\n")
+                    t = m[1]
+                    tag = "hata" if t.startswith(("[x]", "[!]", "[-]")) else "ok" if t.startswith("[✓]") else \
+                        "pdf" if t.startswith("[pdf]") else ""
+                    self.txt_log.insert("end", time.strftime("%H:%M:%S ") + t + "\n", tag)
                     self.txt_log.see("end")
                     if int(self.txt_log.index("end-1c").split(".")[0]) > 3000:
                         self.txt_log.delete("1.0", "500.0")
                 elif kind == "progress":
                     _, done, total, text = m
                     self.pbar.config(maximum=max(total, 1), value=done)
-                    self.lbl_prog.config(text=f"{done}/{total}  {text}")
+                    self._prog_text = f"{done}/{total}  {text}"
+                    self._last_progress = time.time()
+                    self.lbl_prog.config(text=self._prog_text)
                 elif kind == "results" and m[1] == self._query_token:
                     self._show_results(m[2], m[3])
                 elif kind == "facet" and m[1] == self._query_token:
@@ -589,10 +673,24 @@ class KatalogApp:
                     self.busy = False
                     self.refresh_facets()
                     self.apply_filters()
+                    if len(m) > 1 and m[1]:
+                        ge.bildirim(self.root, f"✓ {m[1]} tamamlandı")
+                elif kind == "open":
+                    try:
+                        ge.dosya_ac(m[1])
+                    except Exception as e:
+                        self.log(f"[!] Açılamadı: {e}")
+                    self.apply_filters()
+                elif kind == "toast":
+                    ge.bildirim(self.root, m[1], m[2] if len(m) > 2 else "#1f3a5f")
                 elif kind == "ask_login":
                     self._ask_login(*m[1:])
         except queue.Empty:
             pass
+        # Takılma göstergesi: indirme sürerken 45 sn'den uzun ilerleme yoksa kullanıcıya söyle
+        if self.busy and self._last_progress and time.time() - self._last_progress > 45:
+            self.lbl_prog.config(text=f"{self._prog_text}   ⏳ UYAP yanıtı bekleniyor "
+                                      f"({int(time.time() - self._last_progress)} sn; 40 sn'de kesilip yeniden denenir)")
         if not getattr(self, "_closing", False):
             self.root.after(100, self._drain)
 
@@ -601,6 +699,7 @@ class KatalogApp:
             messagebox.showinfo("Meşgul", "Önceki işlem sürüyor. Bitmesini bekleyin veya 'Durdur'a basın.")
             return
         self.busy = True
+        self._last_progress = time.time()
         self.motor.stop_flag.clear()
         self.motor.pause_flag.clear()
         self.btn_pause.config(text="Duraklat")
@@ -617,7 +716,7 @@ class KatalogApp:
                 self.ui.file_logger.exception("katalog_gui %s", name)
                 self.log(f"[x] {name} hatası: {e}")
             finally:
-                self.ui_q.put(("done",))
+                self.ui_q.put(("done", name))
 
     def _startup_sync(self):
         """Açılışta: klasörden silinen/taşınan indirmeler 'İndirilmedi'ye döner."""
@@ -840,25 +939,250 @@ class KatalogApp:
         except Exception as e:
             self.log(f"[!] Açılamadı: {e}")
 
-    def on_open_doc(self, _e=None):
-        sel = self.tree.selection()
-        if not sel:
+    def on_open_doc(self, _e=None, orijinal: bool = False, eid: int | None = None):
+        if eid is None:
+            sel = self.tree.selection()
+            if not sel:
+                return
+            eid = int(sel[0])
+        r = self.kat.get(eid)
+        if not r:
             return
-        r = self.kat.get(int(sel[0]))
-        p = (r["pdf_path"] if r["pdf_path"] and os.path.exists(r["pdf_path"]) else r["path"]) if r else None
-        if p and os.path.exists(p):
-            self._open(p)
-        else:
-            self.log("[i] Bu evrak henüz indirilmemiş.")
+        for cand in ((r["path"],) if orijinal else (r["pdf_path"], r["path"])) + \
+                ((str(Path(r["cache_path"]).with_suffix(".pdf")), r["cache_path"]) if r["cache_path"] else ()):
+            if cand and os.path.exists(cand):
+                self._open(cand)
+                return
+        # İndirilmemiş: önbelleğe al ve aç (indirme sürerken de çalışır; ayrı iş parçacığı)
+        self.log(f"[*] Önizleme için UYAP'tan alınıyor: {r['tur']} ...")
+
+        def job():
+            try:
+                if not self.bridge.is_logged_in() and not self._ensure_session():
+                    return
+                pth = self.motor.fetch_to_cache(eid)
+                if pth:
+                    self.ui_q.put(("open", str(pth)))
+                    self.ui_q.put(("toast", f"Önbelleğe alındı ve açıldı:\n{Path(pth).name}"))
+            except Exception as e:
+                ek.klog.exception("Önizleme hatası")
+                self.log(f"[x] Önizleme hatası: {e}")
+        threading.Thread(target=job, daemon=True, name="onizleme").start()
 
     def on_open_folder(self):
         sel = self.tree.selection()
         r = self.kat.get(int(sel[0])) if sel else None
-        p = Path(r["path"]).parent if r and r["path"] else self.download_dir
-        self._open(str(p if p.exists() else self.download_dir))
+        target = r["path"] if r and r["path"] and os.path.exists(r["path"]) else None
+        try:
+            ge.klasorde_goster(target or str(self.download_dir))
+        except Exception as e:
+            self.log(f"[!] Açılamadı: {e}")
+
+    # ------------------------------------------------------------------ ayrıntı paneli
+    def _show_detail(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        r = self.kat.get(int(sel[0]))
+        if not r:
+            return
+        durum = ek.DURUMLAR.get(r["durum"], r["durum"]) + (" · önbellekte" if r["cache_path"] else "")
+        satirlar = [
+            f"{'EK ' + str(r['sira']) + ' — ' if r['is_ek'] else ''}{r['tur']}    [{durum}]",
+            f"{r['birim']}  ·  Dosya {r['dosya_no']}  ·  {r['dosya_tur'] or ''}  ·  {r['dosya_durum'] or ''}  ·  Tarih {r['tarih']}",
+            f"Açıklama: {r['aciklama'] or '-'}    Gönderen: {r['gonderen'] or '-'} {r['gonderen_dosya'] or ''}",
+            f"Kategori: {ek.KATEGORI_ADI.get(r['kategori'], r['kategori'])}"
+            + (f"    Ait olduğu evrak: {r['ust_tur']}" if r["is_ek"] else ""),
+        ]
+        if r["path"]:
+            satirlar.append(f"Dosya: {r['path']}" + (f"   (PDF: {Path(r['pdf_path']).name})" if r["pdf_path"] else ""))
+        if r["hata"]:
+            satirlar.append(f"Not: {r['hata']}")
+        self.lbl_detail.config(text="\n".join(satirlar))
+        parent = r["parent_skey"] if r["is_ek"] else r["skey"]
+        fam = self.kat.db.execute(
+            "SELECT id, is_ek, sira, tur, durum, cache_path FROM evrak WHERE skey=? OR parent_skey=? "
+            "ORDER BY is_ek, sira", (parent, parent)).fetchall()
+        self.lb_ekler.delete(0, "end")
+        self._family_ids = []
+        for f in fam:
+            mark = "●" if f["id"] == r["id"] else " "
+            txt = (f"{mark} ASIL: {f['tur']}" if not f["is_ek"] else f"{mark}   ↳ EK{int(f['sira'] or 0):02d}: {f['tur']}")
+            txt += f"   [{ek.DURUMLAR.get(f['durum'], f['durum'])}{' · önbellekte' if f['cache_path'] else ''}]"
+            self.lb_ekler.insert("end", txt)
+            self._family_ids.append(f["id"])
+
+    def _open_family_item(self, _e=None):
+        sel = self.lb_ekler.curselection()
+        if sel:
+            self.on_open_doc(eid=self._family_ids[sel[0]])
+
+    def select_family(self):
+        if not self._family_ids:
+            return
+        missing = [str(i) for i in self._family_ids if not self.tree.exists(str(i))]
+        self.tree.selection_set([str(i) for i in self._family_ids if self.tree.exists(str(i))])
+        if missing:
+            self.log(f"[i] {len(missing)} ek mevcut filtrede görünmüyor; 'Seçilileri indir' yalnızca görünenleri alır. "
+                     "Hepsini indirmek için ayrıntı panelindeki listeden açabilir veya filtreyi gevşetebilirsiniz.")
+
+    def _focus_search(self):
+        self.toggle_filters(True)
+        self.ent_taraf.focus_set()
+
+    # ------------------------------------------------------------------ görünüm
+    def toggle_filters(self, show: bool | None = None):
+        show = (not self._filters_visible) if show is None else show
+        if show and not self._filters_visible:
+            self.body.insert(0, self.filter_outer, weight=0)
+        elif not show and self._filters_visible:
+            self.body.forget(self.filter_outer)
+        self._filters_visible = show
+
+    def _on_resize(self, e):
+        if e.widget is not self.root:
+            return
+        narrow = e.width < 1000
+        if narrow != getattr(self, "_narrow", None):
+            self._narrow = narrow
+            self.toggle_filters(not narrow)
+
+    def zoom(self, delta: float):
+        cur = float(self.root.tk.call("tk", "scaling"))
+        self.root.tk.call("tk", "scaling", max(0.8, min(3.0, cur + delta)))
+        self.log(f"[i] Ölçek: {max(0.8, min(3.0, cur + delta)):.2f} (bazı öğeler pencere yeniden açılınca güncellenir)")
+
+    # ------------------------------------------------------------------ menüler
+    def _build_menu(self):
+        mb = tk.Menu(self.root)
+        m = tk.Menu(mb, tearoff=0)
+        m.add_command(label="İndirme klasörünü aç", command=lambda: ge.dosya_ac(str(self.download_dir)))
+        m.add_command(label="İndirme klasörünü değiştir…", command=self.on_choose_dir)
+        m.add_command(label="Filtredekileri CSV'ye aktar…", command=self.on_export)
+        m.add_separator()
+        m.add_command(label="Önbelleği temizle", command=self.clear_cache)
+        m.add_separator()
+        m.add_command(label="Çıkış", command=self._on_close)
+        mb.add_cascade(label="Dosya", menu=m)
+
+        m = tk.Menu(mb, tearoff=0)
+        m.add_command(label="Bağlan / Giriş", command=self.on_connect)
+        m.add_command(label="UYAP'ı tara (katalog güncelle)", command=self.on_scan)
+        m.add_command(label="Filtredekilerin tümünü indir", command=self.on_download_filtered)
+        m.add_command(label="Seçilileri indir  (Ctrl+D)", command=self.on_download_selected)
+        m.add_separator()
+        m.add_command(label="Duraklat / devam", command=self.on_pause)
+        m.add_command(label="Durdur", command=self.on_stop)
+        mb.add_cascade(label="İşlemler", menu=m)
+
+        m = tk.Menu(mb, tearoff=0)
+        cmds = ge.arac_komutlari()
+        m.add_command(label="İşlemlerim'i indir (son 1 yıl)…", command=lambda: self._run_console("İşlemlerim", cmds["islemlerim_1yil"]))
+        m.add_command(label="İşlemlerim'i indir (tarih aralığı)…", command=self.on_islemlerim_aralik)
+        m.add_command(label="Duruşma takvimi oluştur (.ics + CSV)…", command=lambda: self._run_console("Duruşma takvimi", cmds["durusma_takvimi"]))
+        m.add_command(label="Tebligat ve süre analizi…", command=lambda: self._run_console("Tebligat analizi", cmds["tebligat"]))
+        m.add_command(label="Evrak zenginleştirme ve akıllı adlandırma…", command=lambda: self._run_console("Zenginleştirme", cmds["zenginlestir"]))
+        m.add_separator()
+        m.add_command(label="Toplu PDF'e dönüştür (klasör seç)…", command=self.on_bulk_pdf)
+        m.add_command(label="Dosyaları PDF'e dönüştür (dosya seç)…", command=lambda: self.on_bulk_pdf(files=True))
+        m.add_command(label="Sağ tık 'PDF'e dönüştür' menüsünü kur", command=lambda: self._context_menu(True))
+        m.add_command(label="Sağ tık menüsünü kaldır", command=lambda: self._context_menu(False))
+        m.add_separator()
+        m.add_command(label="UYAP tarayıcısını görünür aç", command=lambda: self._run_console("Tarayıcı", cmds["tarayici"]))
+        mb.add_cascade(label="Araçlar", menu=m)
+
+        m = tk.Menu(mb, tearoff=0)
+        m.add_command(label="Filtre panelini gizle / göster  (Ctrl+B)", command=self.toggle_filters)
+        m.add_command(label="Yakınlaştır", command=lambda: self.zoom(0.15))
+        m.add_command(label="Uzaklaştır", command=lambda: self.zoom(-0.15))
+        m.add_command(label="Filtreleri sıfırla", command=self.reset_filters)
+        mb.add_cascade(label="Görünüm", menu=m)
+
+        m = tk.Menu(mb, tearoff=0)
+        m.add_command(label="Kullanım kılavuzu", command=lambda: ge.kilavuz_penceresi(self.root))
+        m.add_command(label="Günlük (log) klasörünü aç", command=lambda: ge.dosya_ac(str(ek.LOG_DIR)))
+        m.add_command(label="Günlükleri paketle (destek için zip)", command=self.on_pack_logs)
+        m.add_separator()
+        m.add_command(label="Hakkında", command=lambda: ge.hakkinda(self.root))
+        mb.add_cascade(label="Yardım", menu=m)
+        self.root.config(menu=mb)
+
+    def _run_console(self, name: str, cmd: list):
+        try:
+            ge.konsolda_calistir(cmd, cwd=Path(__file__).resolve().parent)
+            self.log(f"[*] {name} ayrı pencerede başlatıldı. (Aynı UYAP oturumunu kullanır.)")
+        except Exception as e:
+            self.log(f"[x] {name} başlatılamadı: {e}")
+
+    def on_islemlerim_aralik(self):
+        from tkinter import simpledialog
+        bas = simpledialog.askstring("İşlemlerim", "Başlangıç tarihi (GG.AA.YYYY):", parent=self.root)
+        if not bas:
+            return
+        bit = simpledialog.askstring("İşlemlerim", "Bitiş tarihi (GG.AA.YYYY):",
+                                     initialvalue=dt.date.today().strftime("%d.%m.%Y"), parent=self.root)
+        if bit:
+            self._run_console("İşlemlerim", ge.islemlerim_tarih(bas.strip(), bit.strip()))
+
+    def on_bulk_pdf(self, files: bool = False):
+        import donusturucu as dn
+        if files:
+            paths = filedialog.askopenfilenames(title="PDF'e dönüştürülecek dosyalar",
+                                                filetypes=[("Desteklenenler", " ".join(f"*{e}" for e in sorted(dn.DESTEKLENEN)))])
+        else:
+            d = filedialog.askdirectory(title="Klasör seç (alt klasörler dahil PDF'i olmayan tüm dosyalar)",
+                                        initialdir=str(self.download_dir))
+            paths = [d] if d else []
+        if not paths:
+            return
+
+        def job():
+            self.log(f"[*] PDF dönüştürme başladı ({len(paths)} seçim)...")
+            r = dn.convert_many(paths, progress=lambda d, t, n: self.on_progress(d, t, f"PDF'e dönüştürülüyor: {n}"))
+            self.log(f"[✓] PDF dönüştürme: {r['tamam']} yeni, {r['vardi']} zaten vardı, {r['hata']} hata (toplam {r['toplam']}).")
+            for h in r["hatalar"][:20]:
+                self.log(f"[x] {h}")
+        self._submit("PDF dönüştürme", job)
+
+    def _context_menu(self, install: bool):
+        try:
+            import sag_tik
+            msg = sag_tik.kur() if install else sag_tik.kaldir()
+            self.log(f"[✓] {msg}")
+            ge.bildirim(self.root, msg + ("\nWindows 11: sağ tık > 'Daha fazla seçenek göster'." if install and os.name == "nt" else ""))
+        except Exception as e:
+            self.log(f"[x] Sağ tık menüsü: {e}")
+
+    def clear_cache(self):
+        n = 0
+        if ek.CACHE_DIR.exists():
+            for f in ek.CACHE_DIR.iterdir():
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+        with self.kat.db:
+            self.kat.db.execute("UPDATE evrak SET cache_path=NULL WHERE cache_path IS NOT NULL")
+        self.log(f"[✓] Önbellek temizlendi ({n} dosya).")
+        self.apply_filters()
+
+    def on_pack_logs(self):
+        try:
+            out = ge.gunlukleri_paketle([ek.LOG_DIR], [Path(self.ui.LOG_FILE)])
+            self.log(f"[✓] Günlükler paketlendi: {out}")
+            ge.bildirim(self.root, f"Günlükler Masaüstüne paketlendi:\n{out.name}")
+            ge.klasorde_goster(str(out))
+        except Exception as e:
+            self.log(f"[x] Günlükler paketlenemedi: {e}")
 
 
 def main():
+    try:  # Windows: yüksek DPI ekranlarda bulanık görünmesin
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
     root = tk.Tk()
     KatalogApp(root)
     root.mainloop()
