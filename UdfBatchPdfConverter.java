@@ -147,6 +147,36 @@ public class UdfBatchPdfConverter {
                         return;
                     }
 
+                    // comments.xml varsa headless ClassCastException hatasını önlemek için in-memory ayıkla
+                    try {
+                        boolean hasComments = false;
+                        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(new ByteArrayInputStream(bytes))) {
+                            java.util.zip.ZipEntry ze;
+                            while ((ze = zis.getNextEntry()) != null) {
+                                if ("comments.xml".equalsIgnoreCase(ze.getName())) {
+                                    hasComments = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (hasComments) {
+                            ByteArrayOutputStream cleaned = new ByteArrayOutputStream(bytes.length);
+                            try (java.util.zip.ZipInputStream zis2 = new java.util.zip.ZipInputStream(new ByteArrayInputStream(bytes));
+                                 java.util.zip.ZipOutputStream zos2 = new java.util.zip.ZipOutputStream(cleaned)) {
+                                java.util.zip.ZipEntry ze2;
+                                byte[] buf = new byte[8192];
+                                while ((ze2 = zis2.getNextEntry()) != null) {
+                                    if ("comments.xml".equalsIgnoreCase(ze2.getName())) continue;
+                                    zos2.putNextEntry(new java.util.zip.ZipEntry(ze2.getName()));
+                                    int n;
+                                    while ((n = zis2.read(buf)) > 0) zos2.write(buf, 0, n);
+                                    zos2.closeEntry();
+                                }
+                            }
+                            bytes = cleaned.toByteArray();
+                        }
+                    } catch (Throwable ignored) {}
+
                     Object bObj = bClass.getDeclaredConstructor().newInstance();
                     try (FileOutputStream fos = new FileOutputStream(pdfFile);
                          ByteArrayInputStream bais = new ByteArrayInputStream(bytes)) {
