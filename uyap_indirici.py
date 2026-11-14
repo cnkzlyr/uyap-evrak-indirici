@@ -554,14 +554,15 @@ class UyapBrowserBridge:
     @staticmethod
     def _find_chrome_bin() -> str | None:
         candidates = [
-            shutil.which("chromium"),
             shutil.which("chromium-browser"),
+            shutil.which("chromium"),
             shutil.which("google-chrome"),
             shutil.which("google-chrome-stable"),
+            "/data/data/com.termux/files/usr/bin/chromium-browser",
+            "/data/data/com.termux/files/usr/bin/chromium",
             "/usr/lib64/chromium-browser/chromium-browser",
             "/usr/bin/chromium-browser",
             "/usr/bin/chromium",
-            "/data/data/com.termux/files/usr/bin/chromium",
         ]
         for c in candidates:
             if c and os.path.isfile(c) and os.access(c, os.X_OK):
@@ -601,6 +602,7 @@ class UyapBrowserBridge:
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
         except Exception as e:
             return False, f"Chromium başlatılamadı: {e}"
@@ -621,14 +623,21 @@ class UyapBrowserBridge:
             return False
 
     def get_uyap_tab(self) -> dict | None:
-        """Açık sekmeler arasından avukat.uyap.gov.tr sekmesini döndürür."""
+        """Açık sekmeler arasından avukat.uyap.gov.tr veya e-Devlet giriş sekmesini döndürür."""
         try:
             tabs = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=2.5).json()
         except Exception:
             return None
         pages = [t for t in tabs if t.get("type") == "page"]
+        # Eğer aktif sekme e-Devlet Mobil İmza ise önce onu döndür
         for t in pages:
-            if "uyap.gov.tr" in (t.get("url") or ""):
+            url = t.get("url") or ""
+            if "giris.turkiye.gov.tr" in url:
+                return t
+        # UYAP portal sekmesi
+        for t in pages:
+            url = t.get("url") or ""
+            if "uyap.gov.tr" in url:
                 return t
         return pages[0] if pages else None
 
@@ -917,7 +926,7 @@ class UyapBrowserBridge:
             else:
                 op_id = "turkcell"
 
-        log_msg("[*] UYAP Mobil İmza sayfasına bağlanılıyor...")
+        log_msg("[*] UYAP Mobil İmza sayfasına yönlendiriliyor...")
 
         # Adım 1: Mobil İmza giriş sayfasına geç
         js_nav = """
@@ -926,20 +935,50 @@ class UyapBrowserBridge:
             if (href.includes("giris.turkiye.gov.tr/Giris/Mobil-Imza")) {
                 return "already_on_mobil_imza";
             }
-            if (!href.includes("avukat.uyap.gov.tr/giris")) {
+            if (!href.includes("avukat.uyap.gov.tr/giris") && !href.includes("avukat.uyap.gov.tr")) {
                 window.location.href = "https://avukat.uyap.gov.tr/giris";
                 return "navigating_to_uyap_giris";
             }
-            const arrow = document.querySelector(".edevlet-dropdown .dx-icon-spindown") || document.querySelector(".edevlet-dropdown");
-            if (arrow) {
-                arrow.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
-                const items = [...document.querySelectorAll(".dx-overlay-content *, .dx-list-item *")];
-                const item = items.find(e => e.innerText && e.innerText.trim().includes("Mobil İmza"));
+
+            // Yöntem 1: DevExtreme React DropDownButton onItemClick doğrudan tetikleme (anında & %100 kararlı)
+            const dd = document.querySelector(".edevlet-dropdown");
+            if (dd) {
+                const reactKey = Object.keys(dd).find(k => k.startsWith("__reactFiber"));
+                if (reactKey && dd[reactKey]) {
+                    let curr = dd[reactKey];
+                    while (curr) {
+                        if (curr.memoizedProps && curr.memoizedProps.onItemClick && curr.memoizedProps.items) {
+                            const mobilItem = curr.memoizedProps.items.find(it => it.name && it.name.includes("Mobil"));
+                            if (mobilItem) {
+                                curr.memoizedProps.onItemClick({ itemData: mobilItem, itemIndex: 0 });
+                                return "invoked_react_mobil_imza";
+                            }
+                        }
+                        curr = curr.return;
+                    }
+                }
+
+                // Yöntem 2: DOM üzerinde görünür liste elemanı varsa tıkla
+                const items = Array.from(document.querySelectorAll('.dx-list-item, [role="option"]'));
+                const item = items.find(e => {
+                    const t = (e.innerText || e.getAttribute('title') || '').trim();
+                    return (t === 'Mobil İmza İle Giriş' || t.startsWith('Mobil İmza')) && e.getBoundingClientRect().width > 0;
+                });
                 if (item) {
                     item.click();
-                    item.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
+                    item.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    item.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    item.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
                     return "clicked_mobil_imza";
                 }
+
+                // Yöntem 3: Dropdown butonunu açmayı dene
+                const btn = dd.querySelector('.dx-dropdownbutton-action') || dd;
+                btn.click();
+                btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                btn.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                return "opened_dropdown";
             }
             return "waiting_dropdown";
         })()
@@ -949,14 +988,28 @@ class UyapBrowserBridge:
                 res = self.eval_js(js_nav, timeout=6.0)
                 if res == "already_on_mobil_imza":
                     break
+                elif res in ("invoked_react_mobil_imza", "clicked_mobil_imza"):
+                    time.sleep(1.0)
+                    for _ in range(15):
+                        t_tab = self.get_uyap_tab()
+                        cur_url = (t_tab.get("url") or "") if t_tab else ""
+                        if "giris.turkiye.gov.tr/Giris/Mobil-Imza" in cur_url:
+                            break
+                        try:
+                            if self.eval_js("window.location.href.includes('giris.turkiye.gov.tr/Giris/Mobil-Imza')", timeout=3.0):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.5)
+                    break
             except Exception:
                 pass
-            time.sleep(1.0)
+            time.sleep(0.8)
 
         # Formun yüklenmesini bekle
         loaded = False
-        for _ in range(40):
-            time.sleep(0.7)
+        for _ in range(35):
+            time.sleep(0.6)
             try:
                 check = self.eval_js("Boolean(document.getElementById('tridField') && document.getElementById('gsmField'))", timeout=5.0)
                 if check:
@@ -968,6 +1021,8 @@ class UyapBrowserBridge:
         if not loaded:
             return False, "Mobil İmza giriş sayfası (giris.turkiye.gov.tr) yüklenemedi."
 
+        log_msg("[*] e-Devlet Mobil İmza formu dolduruluyor...")
+
         # Adım 2: Formu doldur ve gönder
         js_fill = f"""
         (() => {{
@@ -978,13 +1033,22 @@ class UyapBrowserBridge:
 
             tr.value = {json.dumps(tc)};
             tr.dispatchEvent(new Event('input', {{bubbles: true}}));
+            tr.dispatchEvent(new Event('change', {{bubbles: true}}));
+
             gsm.value = {json.dumps(gsm_digits)};
             gsm.dispatchEvent(new Event('input', {{bubbles: true}}));
+            gsm.dispatchEvent(new Event('change', {{bubbles: true}}));
+
             if (op) {{
+                op.click();
                 op.checked = true;
                 op.dispatchEvent(new Event('change', {{bubbles: true}}));
             }}
-            const btn = document.querySelector('.btn-send') || document.getElementById('submitButton') || document.querySelector('input[type="submit"]');
+            const btn = document.querySelector('button[name="submitButton"]') ||
+                        document.querySelector('button[type="submit"]') ||
+                        document.querySelector('.btn-send') ||
+                        document.getElementById('submitButton') ||
+                        document.querySelector('input[type="submit"]');
             if (btn) {{
                 btn.click();
                 return {{ok: true}};
@@ -996,37 +1060,36 @@ class UyapBrowserBridge:
         if not fill_res or not fill_res.get("ok"):
             return False, f"Form doldurulamadı: {fill_res}"
 
-        # Adım 3: Taahhütname (İmzala) adımını bekle
-        time.sleep(1.5)
+        # Adım 3: Taahhütname (İmzala) veya doğrudan Parmak İzi ekranını bekle
+        time.sleep(1.0)
         js_sign = """
         (() => {
             const err = document.querySelector(".errorMessage, .alert-danger");
             if (err && err.innerText.trim()) {
                 return {error: err.innerText.trim()};
             }
-            const btn = document.querySelector('button[name="submitButton"]') ||
-                        document.querySelector('input[name="submitButton"]') ||
-                        document.querySelector('input[type="submit"]') ||
-                        document.querySelector('.btn-send');
+            const text = document.body.innerText || "";
+            if (text.includes("Parmak İzi") || text.includes("operatör") || text.includes("bekleniyor")) {
+                return {ok: true, step: "already_waiting_fp"};
+            }
+            const btn = Array.from(document.querySelectorAll('button, input[type="submit"], input[name="submitButton"], .btn-send')).find(b => {
+                const txt = (b.innerText || b.value || '').trim();
+                return txt.includes("İmzala") || txt === "Onayla";
+            });
             if (btn) {
-                const txt = (btn.innerText || btn.value || '').trim();
-                if (txt.includes("İmzala") || txt.includes("Devam")) {
-                    btn.click();
-                    return {ok: true, clicked: "imzala"};
-                }
+                btn.click();
+                return {ok: true, step: "clicked_imzala"};
             }
             return {waiting: true};
         })()
         """
-        signed_step = False
-        for _ in range(20):
+        for _ in range(15):
             time.sleep(0.6)
             try:
                 s_res = self.eval_js(js_sign, timeout=6.0)
                 if s_res and s_res.get("error"):
                     return False, f"e-Devlet Hatası: {s_res['error']}"
                 if s_res and s_res.get("ok"):
-                    signed_step = True
                     break
             except Exception:
                 pass
@@ -1038,7 +1101,8 @@ class UyapBrowserBridge:
         (() => {
             const text = document.body.innerText || "";
             let fp = "";
-            const m = text.match(/İşlemin Parmak İzi:\\s*([A-F0-9\\s]{10,})/i);
+            const m = text.match(/(?:İşlemin\\s+)?Parmak\\s+İzi\\s*[:\\-]?\\s*([A-F0-9\\s]{8,})/i) ||
+                      text.match(/([A-F0-9]{4}\\s+[A-F0-9]{4}\\s+[A-F0-9]{4})/i);
             if (m) {
                 fp = m[1].trim();
             }
@@ -1046,12 +1110,12 @@ class UyapBrowserBridge:
                 url: window.location.href,
                 has_fingerprint: Boolean(fp),
                 fingerprint: fp,
-                is_waiting_user: text.includes("operatorden cevap") || text.includes("tamamlamanız bekleniyor") || text.includes("uyarısı")
+                is_waiting_user: text.includes("operatorden cevap") || text.includes("operatör") || text.includes("bekleniyor")
             };
         })()
         """
         fp_str = ""
-        for _ in range(30):
+        for _ in range(25):
             time.sleep(0.5)
             try:
                 st = self.eval_js(js_wait_fp, timeout=5.0)
@@ -1074,7 +1138,7 @@ class UyapBrowserBridge:
         (() => {
             const url = window.location.href;
             // 1. OAuth onay ekranı geldi mi?
-            const oauthBtn = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn')].find(b => {
+            const oauthBtn = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn')).find(b => {
                 const txt = (b.innerText || b.value || '').trim();
                 return txt === 'Onayla' || txt.includes('Onayla');
             });
@@ -1083,7 +1147,7 @@ class UyapBrowserBridge:
                 return {status: "clicked_oauth_onayla"};
             }
             // 2. UYAP sayfasına ulaştık mı?
-            if (url.includes("avukat.uyap.gov.tr") && !url.includes("/giris")) {
+            if (url.includes("avukat.uyap.gov.tr")) {
                 return {status: "at_uyap_portal", url};
             }
             return {status: "waiting", url};
@@ -1095,11 +1159,9 @@ class UyapBrowserBridge:
             time.sleep(2.0)
             try:
                 poll = self.eval_js(js_poll_done, timeout=6.0)
-                if not poll:
-                    continue
-                if poll.get("status") == "clicked_oauth_onayla":
+                if poll and poll.get("status") == "clicked_oauth_onayla":
                     log_msg("[*] e-Devlet izin ekranı otomatik onaylandı. UYAP'a yönlendiriliyor...")
-                    time.sleep(2.5)
+                    time.sleep(2.0)
 
                 uinfo = self.check_login_and_user()
                 usr = uinfo.get("user") or {}
