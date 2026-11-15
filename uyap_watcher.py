@@ -117,22 +117,29 @@ class TelegramClient:
 # ---------------------------------------------------------------------------
 # Yapılandırma Yönetimi
 # ---------------------------------------------------------------------------
+DEFAULT_WATCHED_CATEGORIES = [
+    "durusma", "bilirkisi", "karar", "tensip", "dilekce",
+    "layihalar", "tebligat", "kesinlesme", "iddianame", "tutuklama"
+]
+
 def load_config() -> dict:
+    cfg = {}
     if CONFIG_FILE.exists():
         try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {
-        "telegram_token": os.environ.get("UYAP_TELEGRAM_TOKEN", ""),
-        "telegram_chat_id": os.environ.get("UYAP_TELEGRAM_CHAT_ID", ""),
-        "interval_minutes": 30,
-        "keepalive_minutes": 3,
-        "google_drive_dir": "",
-        "check_open_cases": True,
-        "check_durusma": True,
-        "check_tebligat": True,
-    }
+    cfg.setdefault("telegram_token", os.environ.get("UYAP_TELEGRAM_TOKEN", ""))
+    cfg.setdefault("telegram_chat_id", os.environ.get("UYAP_TELEGRAM_CHAT_ID", ""))
+    cfg.setdefault("interval_minutes", 15)
+    cfg.setdefault("keepalive_minutes", 3)
+    cfg.setdefault("google_drive_dir", "G:\\Drive'ım\\UYAP_Arsiv")
+    cfg.setdefault("google_drive_webhook", "")
+    cfg.setdefault("check_open_cases", True)
+    cfg.setdefault("check_durusma", True)
+    cfg.setdefault("check_tebligat", True)
+    cfg.setdefault("watched_categories", DEFAULT_WATCHED_CATEGORIES)
+    return cfg
 
 
 def save_config(cfg: dict) -> None:
@@ -267,20 +274,28 @@ class UyapWatcher:
                 all_case_docs = cur.fetchall()
 
                 truly_fresh = []
+                watched_cats = set(self.config.get("watched_categories") or DEFAULT_WATCHED_CATEGORIES)
+                allow_all = "tumu" in watched_cats or "*" in watched_cats
+
                 for row in all_case_docs:
                     skey = row["skey"]
                     # 1. Zaten indirilmişse veya mükerrerse atla
                     if row["durum"] in ("indirildi", "mukerrer"):
                         continue
 
-                    # 2. Google Drive / diskte hedef PDF zaten var mı kontrol et!
+                    # 2. Kategori Filtresi: Yalnızca kullanıcının ilgilendiği hayati evraklar!
+                    kat = str(row["kategori"] or row["ust_kategori"] or "").lower()
+                    if not allow_all and kat and kat not in watched_cats:
+                        continue
+
+                    # 3. Google Drive / diskte hedef PDF zaten var mı kontrol et!
                     target_pdf = ek.target_path_for(row, download_dir / "DAVA_EVRAKLARI", ".pdf")
                     if target_pdf.exists() and target_pdf.stat().st_size > 0:
                         # Drive'da zaten var! 'indirildi' olarak işaretle ve sessizce geç
                         self.katalog.set_result(row["id"], durum="indirildi", pdf_path=str(target_pdf))
                         continue
 
-                    # 3. Daha önce mevcut skey'ler arasındaysa da atla (eski evrak)
+                    # 4. Daha önce mevcut skey'ler arasındaysa da atla (eski evrak)
                     if skey in existing_skeys:
                         continue
 

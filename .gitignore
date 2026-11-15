@@ -2,6 +2,7 @@
 UYAP_Indirilenler/
 .uyap_chrome_profile/
 .uyap_config.json
+watcher_config.json
 indirme_gecmisi.json
 indirme_indeksi.csv
 *cache.json
