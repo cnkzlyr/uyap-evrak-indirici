@@ -1131,7 +1131,58 @@ class UyapBrowserBridge:
             return False, f"ArkSigner yanıt vermedi (HTTP {r.status_code})."
         return True, "ArkSigner hazır."
 
-    def auto_relogin(self, pin: str = DEFAULT_E_IMZA_PIN) -> tuple[bool, str]:
+    # Kart okuyucu oturumu takılınca (ilk girişten sonra "Kart okuyucudan sertifika alınamadı")
+    # e-İmza istemcisini yeniden başlatmak gerekir; bunu otomatik yapar.
+    _ESIGN_EXE_CANDIDATES = (
+        r"%LOCALAPPDATA%\Adalet E-imza\Adalet E-imza.exe",
+        r"%LOCALAPPDATA%\Programs\Ark\ArkSigner\ArkSigner.exe",
+        r"%ProgramFiles%\Adalet E-imza\Adalet E-imza.exe",
+        r"%ProgramFiles(x86)%\Adalet E-imza\Adalet E-imza.exe",
+    )
+
+    def restart_esign_client(self, wait_s: float = 45.0) -> tuple[bool, str]:
+        """Windows: 5975 portunu dinleyen e-İmza istemcisini (Adalet E-imza / ArkSigner) kapatıp yeniden
+        açar ve kart hazır olana kadar bekler. Diğer sistemlerde yalnızca bilgi döner."""
+        if os.name != "nt":
+            return False, "e-İmza istemcisini yeniden başlatın (otomatik yeniden başlatma yalnızca Windows'ta)."
+        exe = None
+        try:
+            ps = ("$c=Get-NetTCPConnection -LocalPort 5975 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;"
+                  "if($c){(Get-Process -Id $c.OwningProcess).Path}")
+            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                                 text=True, timeout=20, creationflags=0x08000000).stdout.strip()
+            if out and os.path.exists(out):
+                exe = out
+        except Exception:
+            pass
+        if not exe:
+            exe = next((os.path.expandvars(c) for c in self._ESIGN_EXE_CANDIDATES
+                        if os.path.exists(os.path.expandvars(c))), None)
+        if not exe:
+            return False, "e-İmza istemcisi (Adalet E-imza / ArkSigner) bulunamadı; elle yeniden başlatın."
+        name = os.path.basename(exe)
+        file_logger.warning("e-İmza istemcisi yeniden başlatılıyor: %s", exe)
+        subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, timeout=20, creationflags=0x08000000)
+        time.sleep(2.0)
+        try:
+            subprocess.Popen([exe], cwd=os.path.dirname(exe), creationflags=0x00000008 | 0x00000200,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            return False, f"e-İmza istemcisi başlatılamadı: {e}"
+        t0 = time.time()
+        while time.time() - t0 < wait_s:
+            time.sleep(2.0)
+            try:
+                r = self._http.get(f"{ARKSIGNER_URL}/api/v1/signature/getCertificates", timeout=6)
+                cards = (r.json() or {}).get("data") or []
+                if any(c.get("ready") is not False and c.get("certificates") for c in cards):
+                    file_logger.info("e-İmza istemcisi hazır (%.0f sn)", time.time() - t0)
+                    return True, f"e-İmza istemcisi yeniden başlatıldı ({name})."
+            except Exception:
+                continue
+        return False, "e-İmza istemcisi yeniden başlatıldı ama kart hazır görünmüyor; kartı çıkarıp takın."
+
+    def auto_relogin(self, pin: str = DEFAULT_E_IMZA_PIN, _restarted: bool = False) -> tuple[bool, str]:
         """
         ArkSigner (http://localhost:5975) üzerinden PIN ile challenge imzalatır ve tarayıcıdaki
         UYAP sekmesinde (UYAP'ın kendi akışıyla aynı: web1.uyap -> login.uyap ->
@@ -1193,6 +1244,15 @@ class UyapBrowserBridge:
                 if any(w in tr_lower(emsg) for w in _PIN_ERROR_WORDS):
                     self._rejected_pins.add(pin_hash)
                     return False, f"e-İmza PIN hatası: {emsg} (Dikkat: art arda hatalı PIN kartı bloke eder.)"
+                # Kart okuyucu oturumu takıldı: istemciyi yeniden başlatıp BİR kez daha dene
+                # (kart PIN'i hiç görmediği için PIN deneme sayacı artmaz)
+                low = tr_lower(emsg)
+                if not _restarted and any(k in low for k in ("sertifika alınamadı", "sertifika alinamadi", "okuyucu", "kart")):
+                    file_logger.warning("ArkSigner kart hatası (%s); istemci yeniden başlatılıp tekrar denenecek", emsg)
+                    ok_r, msg_r = self.restart_esign_client()
+                    if ok_r:
+                        return self.auto_relogin(pin, _restarted=True)
+                    return False, f"e-İmza imzalama hatası: {emsg}. {msg_r}"
                 return False, f"e-İmza imzalama hatası: {emsg}"
             sig_res = s_data.get("data") if isinstance(s_data.get("data"), dict) else s_data
             sig, tx_id = sig_res.get("signedData"), sig_res.get("txId")
