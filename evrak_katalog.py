@@ -954,16 +954,16 @@ class Motor:
             cases = [c for c in cases if self._case_dkey(c) in only_dkeys]
         self.log(f"[✓] {len(cases)} dosya taranacak. Taraf ve evrak listeleri çekiliyor...")
         taraf_map = {}  # dkey -> taraf listesi
-        for i in range(0, len(cases), 20):
+        for i in range(0, len(cases), 6):  # UYAP çok sayıda eşzamanlı isteği reddedebiliyor
             if self.stop_flag.is_set():
                 return 0
-            chunk = cases[i:i + 20]
+            chunk = cases[i:i + 6]
             res = self._taraflar_batch([str(c.get("dosyaId") or c.get("dosyaID") or "") for c in chunk])
             for c in chunk:
                 v = res.get(str(c.get("dosyaId") or c.get("dosyaID") or ""))
                 if v:
                     taraf_map[self._case_dkey(c)] = v
-            self.progress(min(i + 20, len(cases)), len(cases), "Taraf bilgileri")
+            self.progress(min(i + 6, len(cases)), len(cases), "Taraf bilgileri")
         avukat = self._avukat_adi(list(taraf_map.values()))
         if avukat:
             self.log(f"[i] Müvekkil tespiti için vekil adı: {avukat}")
@@ -1043,6 +1043,13 @@ class Motor:
                 self.case_ids[Katalog.dkey_of(c.get("birimAdi"), c.get("dosyaNo") or c.get("dosyaNO"))] = \
                     str(c.get("dosyaId") or c.get("dosyaID") or "")
         cid = self.case_ids.get(dkey)
+        if not cid:
+            # Liste eksik gelmiş olabilir (UYAP bazı istekleri reddedebiliyor): bir kez daha çek
+            cases = self.bridge.query_tum_dosyalar(include_closed=True, use_cache=False) or []
+            self.case_ids.update({Katalog.dkey_of(c.get("birimAdi"), c.get("dosyaNo") or c.get("dosyaNO")):
+                                  str(c.get("dosyaId") or c.get("dosyaID") or "") for c in cases})
+            cid = self.case_ids.get(dkey)
+            klog.debug("Dosya listede yoktu, liste yeniden çekildi (%d dosya): %s -> %s", len(cases), dkey, bool(cid))
         if not cid:
             return False
         res = self._evraklar_batch([cid])

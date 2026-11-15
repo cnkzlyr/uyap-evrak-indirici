@@ -1778,45 +1778,68 @@ class UyapBrowserBridge:
             ];
             const durumlar = {json.dumps(durum_vals)};
 
+            // UYAP aynı anda çok sayıda isteği zaman zaman reddeder: her istek 3 kez denenir,
+            // aynı anda en fazla 6 istek çalışır (önceden reddedilen kategoriler sessizce boş dönüyordu).
+            let active = 0;
+            const waiting = [];
+            const acquire = () => new Promise(res => {{ if (active < 6) {{ active++; res(); }} else waiting.push(res); }});
+            const release = () => {{ const n = waiting.shift(); if (n) n(); else active--; }};
+            const postJson = async (url, body) => {{
+                await acquire();
+                try {{ return await postJsonRaw(url, body); }} finally {{ release(); }}
+            }};
+            const postJsonRaw = async (url, body) => {{
+                for (let t = 0; t < 3; t++) {{
+                    try {{
+                        const r = await fetch(url, {{method: "POST", headers: {{"Content-Type": "application/json"}},
+                                                    body: JSON.stringify(body)}});
+                        if (r.ok) {{
+                            const d = await r.json();
+                            if (Array.isArray(d)) return d;
+                        }}
+                    }} catch (e) {{}}
+                    await new Promise(res => setTimeout(res, 600 * (t + 1)));
+                }}
+                return null;
+            }};
+            let failed = 0;
             let tasks = [];
             for (let [y_tur, b_tur] of birimler) {{
                 for (let durum of durumlar) {{
                     tasks.push((async () => {{
-                        try {{
-                            let resp = await fetch("/search_phrase_detayli.ajx", {{
-                                method: "POST",
-                                headers: {{"Content-Type": "application/json"}},
-                                body: JSON.stringify({{
-                                    dosyaDurumKod: durum,
-                                    birimTuru3: y_tur,
-                                    birimTuru2: b_tur,
-                                    pageSize: 200,
-                                    pageNumber: 1
-                                }})
-                            }});
-                            if (!resp.ok) return [];
-                            let d = await resp.json();
-                            if (Array.isArray(d) && Array.isArray(d[0])) {{
-                                return d[0].map(x => ({{...x, dosyaDurumGenel: durum === 1 ? "Açık" : "Kapalı"}}));
+                        // UYAP sayfa başına en fazla 200 dosya döner: TÜM sayfalar çekilmeli
+                        const out = [];
+                        for (let page = 1; page <= 50; page++) {{
+                            try {{
+                                const d = await postJson("/search_phrase_detayli.ajx", {{
+                                    dosyaDurumKod: durum, birimTuru3: y_tur, birimTuru2: b_tur,
+                                    pageSize: 200, pageNumber: page
+                                }});
+                                if (d === null) {{ failed++; break; }}
+                                const list = Array.isArray(d[0]) ? d[0] : [];
+                                for (const x of list) out.push({{...x, dosyaDurumGenel: durum === 1 ? "Açık" : "Kapalı"}});
+                                if (list.length < 200) break;
+                            }} catch (e) {{
+                                break;
                             }}
-                            return [];
-                        }} catch (e) {{
-                            return [];
                         }}
+                        return out;
                     }})());
                 }}
             }}
 
             tasks.push((async () => {{
-                try {{
-                    let resp = await fetch("/avukat_dosya_sorgula_cbs_brd.ajx", {{
-                        method: "POST",
-                        headers: {{"Content-Type": "application/json"}},
-                        body: JSON.stringify({{dosyaDurumKod: 1, pageSize: 200, pageNumber: 1}})
-                    }});
-                    let d = await resp.json();
-                    return (Array.isArray(d) && Array.isArray(d[0])) ? d[0] : [];
-                }} catch (e) {{ return []; }}
+                const out = [];
+                for (let page = 1; page <= 50; page++) {{
+                    try {{
+                        const d = await postJson("/avukat_dosya_sorgula_cbs_brd.ajx", {{dosyaDurumKod: 1, pageSize: 200, pageNumber: page}});
+                        if (d === null) {{ failed++; break; }}
+                        const list = Array.isArray(d[0]) ? d[0] : [];
+                        out.push(...list);
+                        if (list.length < 200) break;
+                    }} catch (e) {{ break; }}
+                }}
+                return out;
             }})());
 
             let results = await Promise.all(tasks);
@@ -1834,7 +1857,7 @@ class UyapBrowserBridge:
             return allCases;
         }})()
         """
-        cases = self.eval_js(js, timeout=45.0) or []
+        cases = self.eval_js(js, timeout=120.0) or []
         if cases and include_closed:
             try:
                 cache_file.write_text(
