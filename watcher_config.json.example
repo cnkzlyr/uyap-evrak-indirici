@@ -7,5 +7,6 @@
   "google_drive_webhook": "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec",
   "check_open_cases": true,
   "check_durusma": true,
-  "check_tebligat": true
+  "check_tebligat": true,
+  "telegram_summary_report": true
 }

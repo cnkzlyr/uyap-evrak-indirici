@@ -138,6 +138,7 @@ def load_config() -> dict:
     cfg.setdefault("check_open_cases", True)
     cfg.setdefault("check_durusma", True)
     cfg.setdefault("check_tebligat", True)
+    cfg.setdefault("telegram_summary_report", True)
     cfg.setdefault("watched_categories", DEFAULT_WATCHED_CATEGORIES)
     return cfg
 
@@ -232,28 +233,42 @@ class UyapWatcher:
         except Exception as e:
             logger.debug("Heartbeat hatası: %s", e)
 
-    def scan_open_cases(self) -> int:
-        """Açık (derdest) 149 dosyayı nazikçe sorgular; yeni evrakları yakalayıp indirir."""
+    def scan_open_cases(self) -> dict:
+        """Açık (derdest) 149 dosyayı nazikçe sorgular; yeni evrakları yakalayıp indirir ve detaylı raporlar."""
         if not self.bridge:
-            return 0
+            return {"new_downloaded": 0, "total_docs": 0, "already_in_drive": 0}
+
+        start_time = time.time()
 
         # Sadece 'Açık' durumdaki dosyaları çek
         cur = self.katalog.db.execute(
             "SELECT dkey, birim, dosya_no, dosya_id, evrak_sayisi FROM dosya WHERE durum='Açık' ORDER BY taranma ASC"
         )
         open_cases = cur.fetchall()
-        logger.info("Derdest (Açık) Dosya Nöbetçisi: %d dosya kontrol ediliyor...", len(open_cases))
+        total_cases = len(open_cases)
+        logger.info("Derdest (Açık) Dosya Nöbetçisi: %d dosya kontrol ediliyor...", total_cases)
 
-        new_doc_count = 0
+        stats = {
+            "total_cases": total_cases,
+            "processed_cases": 0,
+            "total_docs": 0,
+            "already_in_drive": 0,
+            "filtered_category": 0,
+            "new_downloaded": 0,
+            "elapsed_seconds": 0.0,
+        }
+
         drive_dir = Path(self.config.get("google_drive_dir")) if self.config.get("google_drive_dir") else None
         download_dir = drive_dir or Path(os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
 
-        for case in open_cases:
+        for idx, case in enumerate(open_cases, 1):
             self.heartbeat()
             dkey = case["dkey"]
             dosya_id = case["dosya_id"]
             if not dosya_id:
                 continue
+
+            stats["processed_cases"] += 1
 
             try:
                 # UYAP'tan dosyanın güncel evrak sayfalarını al
@@ -277,6 +292,7 @@ class UyapWatcher:
                     "SELECT * FROM evrak WHERE dkey=? ORDER BY id ASC", (dkey,)
                 )
                 all_case_docs = cur.fetchall()
+                stats["total_docs"] += len(all_case_docs)
 
                 truly_fresh = []
                 watched_cats = set(self.config.get("watched_categories") or DEFAULT_WATCHED_CATEGORIES)
@@ -284,24 +300,29 @@ class UyapWatcher:
 
                 for row in all_case_docs:
                     skey = row["skey"]
-                    # 1. Zaten indirilmişse veya mükerrerse atla
-                    if row["durum"] in ("indirildi", "mukerrer"):
-                        continue
-
-                    # 2. Kategori Filtresi: Yalnızca kullanıcının ilgilendiği hayati evraklar!
-                    kat = str(row["kategori"] or row["ust_kategori"] or "").lower()
-                    if not allow_all and kat and kat not in watched_cats:
-                        continue
-
-                    # 3. Google Drive / diskte hedef PDF zaten var mı kontrol et!
                     target_pdf = ek.target_path_for(row, download_dir / "DAVA_EVRAKLARI", ".pdf")
+
+                    # 1. Zaten indirilmişse veya mükerrerse
+                    if row["durum"] in ("indirildi", "mukerrer"):
+                        stats["already_in_drive"] += 1
+                        continue
+
+                    # 2. Google Drive / diskte hedef PDF fiziken mevcut mu?
                     if target_pdf.exists() and target_pdf.stat().st_size > 0:
                         # Drive'da zaten var! 'indirildi' olarak işaretle ve sessizce geç
                         self.katalog.set_result(row["id"], durum="indirildi", pdf_path=str(target_pdf))
+                        stats["already_in_drive"] += 1
+                        continue
+
+                    # 3. Kategori Filtresi: Yalnızca kullanıcının ilgilendiği hayati evraklar!
+                    kat = str(row["kategori"] or row["ust_kategori"] or "").lower()
+                    if not allow_all and kat and kat not in watched_cats:
+                        stats["filtered_category"] += 1
                         continue
 
                     # 4. Daha önce mevcut skey'ler arasındaysa da atla (eski evrak)
                     if skey in existing_skeys:
+                        stats["already_in_drive"] += 1
                         continue
 
                     truly_fresh.append((row, target_pdf))
@@ -372,7 +393,7 @@ class UyapWatcher:
                         else:
                             self.tg.send_message(msg_text)
 
-                        new_doc_count += 1
+                        stats["new_downloaded"] += 1
 
                 # Taranma zamanını tazele
                 now_str = dt.datetime.now().isoformat()[:19]
@@ -382,6 +403,14 @@ class UyapWatcher:
             except Exception as e:
                 logger.debug("[%s] Evrak tarama atlandı: %s", case["dosya_no"], e)
 
+            # Periyodik ilerleme gösterimi (Her 15 dosyada bir veya son dosyada)
+            if idx % 15 == 0 or idx == total_cases:
+                pct = int((idx / total_cases) * 100)
+                logger.info(
+                    "⏳ İlerleme: [%d/%d - %%%d] | Taranan Evrak: %d | Drive'da Doğrulanan: %d | Filtrelenen (Rutin): %d | Yeni: %d",
+                    idx, total_cases, pct, stats["total_docs"], stats["already_in_drive"], stats["filtered_category"], stats["new_downloaded"]
+                )
+
             # WAF'a takılmamak için nazik bekleme
             time.sleep(1.5)
 
@@ -389,7 +418,44 @@ class UyapWatcher:
         if drive_dir:
             self.katalog.cloud_backup(drive_dir / "uyap_katalog_yedek.db")
 
-        return new_doc_count
+        stats["elapsed_seconds"] = round(time.time() - start_time, 1)
+        mins = int(stats["elapsed_seconds"] // 60)
+        secs = int(stats["elapsed_seconds"] % 60)
+        duration_str = f"{mins} dk {secs} sn" if mins > 0 else f"{secs} sn"
+
+        # Detaylı Terminal Raporu
+        logger.info("=" * 65)
+        logger.info("  UYAP Nöbetçi Tarama Raporu (Döngü Tamamlandı)")
+        logger.info("=" * 65)
+        logger.info("  📁 Kontrol Edilen Açık Dosya : %d / %d", stats["processed_cases"], stats["total_cases"])
+        logger.info("  📄 Taranan Toplam Evrak      : %d adet", stats["total_docs"])
+        logger.info("  ☁️ Google Drive'da Mevcut    : %d adet", stats["already_in_drive"])
+        logger.info("  🛡️ Filtrelenen (Rutin Evrak) : %d adet", stats["filtered_category"])
+        logger.info("  🔔 Yeni İndirilen & Bildirilen: %d adet", stats["new_downloaded"])
+        logger.info("  ⏱️ Toplam Tarama Süresi      : %s", duration_str)
+        logger.info("=" * 65)
+
+        # Telegram Döngü Özeti Gönderimi
+        if self.tg.is_configured and self.config.get("telegram_summary_report", True):
+            now_time = dt.datetime.now().strftime("%H:%M")
+            next_mins = self.config.get("interval_minutes", 15)
+            next_time = (dt.datetime.now() + dt.timedelta(minutes=next_mins)).strftime("%H:%M")
+
+            tg_report = (
+                f"📊 <b>UYAP Nöbetçi Tarama Raporu</b>\n"
+                f"⏰ <b>Saat:</b> {now_time} | <b>Süre:</b> {duration_str}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📁 <b>İncelenen Açık Dosya:</b> {stats['processed_cases']}\n"
+                f"📄 <b>Taranan Toplam Evrak:</b> {stats['total_docs']:,}\n"
+                f"☁️ <b>Google Drive'da Mevcut:</b> {stats['already_in_drive']:,}\n"
+                f"🛡️ <b>Filtrelenen Rutin Evrak:</b> {stats['filtered_category']:,}\n"
+                f"🔔 <b>Yeni İndirilen Evrak:</b> {stats['new_downloaded']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏳ <b>Sonraki Kontrol:</b> {next_time} ({next_mins} dk sonra)"
+            ).replace(",", ".")
+            self.tg.send_message(tg_report)
+
+        return stats
 
     def check_upcoming_hearings(self) -> None:
         """Önümüzdeki 7 günün duruşmalarını çeker, yaklaşanları Telegram'dan bildirir."""
@@ -434,19 +500,20 @@ class UyapWatcher:
         except Exception as e:
             logger.debug("Duruşma sorgulama atlandı: %s", e)
 
-    def run_loop(self) -> None:
-        """Sürekli arka plan nöbet döngüsü."""
+    def run_loop(self, once: bool = False) -> None:
+        """Sürekli arka plan nöbet döngüsü veya tek seferlik tarama (--once)."""
         logger.info("=" * 65)
         logger.info("  UYAP Nöbetçi Bot Devrede")
-        logger.info("  Döngü Aralığı: %d dakika", self.config.get("interval_minutes", 30))
+        logger.info("  Döngü Aralığı: %d dakika", self.config.get("interval_minutes", 15))
         if self.tg.is_configured:
             logger.info("  Telegram Bildirimleri: AKTİF")
-            self.tg.send_message("🛡️ <b>UYAP Nöbetçi Bot Başlatıldı!</b>\nAçık dosyalar ve yeni evraklar izleniyor.")
+            if not once:
+                self.tg.send_message("🛡️ <b>UYAP Nöbetçi Bot Başlatıldı!</b>\nAçık dosyalar ve yeni evraklar izleniyor.")
         else:
             logger.warning("  Telegram Bildirimleri: YAPILANDIRILMAMIŞ (Terminal loglanacak)")
         logger.info("=" * 65)
 
-        interval_s = self.config.get("interval_minutes", 30) * 60
+        interval_s = self.config.get("interval_minutes", 15) * 60
 
         while True:
             try:
@@ -454,6 +521,8 @@ class UyapWatcher:
                     logger.info("UYAP tarayıcısı aranıyor / bağlanılıyor...")
                     if not self.connect_bridge():
                         logger.warning("UYAP bağlantısı kurulamadı. 60 sn sonra tekrar denenecek.")
+                        if once:
+                            break
                         time.sleep(60)
                         continue
 
@@ -465,17 +534,24 @@ class UyapWatcher:
 
                 # 3. Derdest açık dosyaların evrak kontrolü
                 if self.config.get("check_open_cases", True):
-                    yeni_sayisi = self.scan_open_cases()
+                    stats = self.scan_open_cases()
+                    yeni_sayisi = stats.get("new_downloaded", 0) if isinstance(stats, dict) else stats
                     if yeni_sayisi > 0:
                         logger.info("Döngü tamamlandı: %d yeni evrak işlendi.", yeni_sayisi)
+
+                if once:
+                    logger.info("Tek seferlik nöbetçi kontrolü (--once) tamamlandı.")
+                    break
 
             except KeyboardInterrupt:
                 logger.info("Nöbetçi kullanıcı tarafından durduruldu.")
                 break
             except Exception as e:
                 logger.error("Nöbetçi döngü hatası: %s", e)
+                if once:
+                    break
 
-            logger.info("Sonraki kontrol için bekleniyor (%d dakika)...", self.config.get("interval_minutes", 30))
+            logger.info("Sonraki kontrol için bekleniyor (%d dakika)...", self.config.get("interval_minutes", 15))
             time.sleep(interval_s)
 
 
@@ -528,6 +604,7 @@ def main():
     parser = argparse.ArgumentParser(description="UYAP Nöbetçi Bot & Arka Plan İzleyici")
     parser.add_argument("--setup", action="store_true", help="Telegram ve nöbetçi ayarlarını yap")
     parser.add_argument("--test-telegram", action="store_true", help="Telegram bağlantısını test et")
+    parser.add_argument("--once", action="store_true", help="Tek bir tarama turu yap, raporla ve çık")
     parser.add_argument("--interval", type=int, default=None, help="Kontrol aralığı (dakika)")
     parser.add_argument("--drive-dir", type=str, default=None, help="Google Drive hedef klasörü")
     args = parser.parse_args()
@@ -554,7 +631,7 @@ def main():
         return
 
     watcher = UyapWatcher(cfg)
-    watcher.run_loop()
+    watcher.run_loop(once=args.once)
 
 
 if __name__ == "__main__":
