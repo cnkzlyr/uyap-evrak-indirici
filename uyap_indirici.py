@@ -4168,7 +4168,25 @@ def run_cli_durusmalar_mode(args, bridge, app_helper, download_dir, tckn):
     print(f"\n[✓] Duruşma Takvimi Oluşturuldu: {ics_path}")
     print("    (Bu dosyayı telefonunuzda açarak tüm duruşmaları Google Takvim / Telefon Takviminize tek tıkla ekleyebilirsiniz)\n")
 
-    # 2. CSV Çıktısı
+    # 2. CSV Çıktısı ve Veritabanı Kaydı
+    try:
+        import evrak_katalog as ek
+        kat = ek.Katalog()
+        for d in all_durusmalar:
+            dt_raw = str(d.get("tarihSaat") or "")
+            tarih_part = dt_raw.split()[0] if " " in dt_raw else dt_raw
+            saat_part = dt_raw.split()[1] if " " in dt_raw else ""
+            kat.upsert_durusma({
+                "birim": d.get("yerelBirimAd"),
+                "dosya_no": d.get("dosyaNo"),
+                "tarih": tarih_part,
+                "saat": saat_part,
+                "yer": d.get("yerelBirimAd"),
+                "aciklama": f"{d.get('islemTuruAciklama', '')} - Sonuç: {d.get('islemSonucuAciklama', '')}",
+            })
+    except Exception:
+        pass
+
     csv_path = download_dir / "durusma_listesi.csv"
     try:
         with csv_path.open("w", newline="", encoding="utf-8-sig") as f:

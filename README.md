@@ -26,6 +26,79 @@ UYAP Avukat Portal (`https://avukat.uyap.gov.tr`) üzerindeki tüm derdest ve ka
 
 ---
 
+## ⚡ Sürüm 3.1 — Neler Yeni? (Bulut Mimarisi & Nöbetçi Bot)
+
+| Modül / Özellik | Açıklama |
+|---|---|
+| **Nöbetçi Bot (`uyap_watcher.py`)** | UYAP'ı 7/24 arka planda izleyen akıllı servis. "İşlemlerim" yerine yalnızca **derdest (açık) 149 dosyayı** ve gelen tebligatları nazikçe sorgular; yeni evrak düştüğü an yakalar, indirir, PDF yapar ve **Telegram'dan anında PDF ekiyle avukata iletir**. |
+| **Oturum Koruyucu (Keep-Alive Heartbeat)** | Her 3 dakikada bir UYAP'a hafif AJAX pinglemesi atarak oturumun gün boyu düşmesini engeller. Tek bir e-imza ile sistem kesintisiz canlı kalır. |
+| **Hukuki Süre Analizcisi** | Gelen evrak tebligat, bilirkişi raporu, tensip zaptı veya gerekçeli karar ise; **Tebligat Kanunu m. 7/a** (elektronik tebligatta 5 gün kuralı), **HMK m. 281** (bilirkişiye 2 hafta itiraz) vb. yasal süreleri hesaplayıp Telegram bildirimine ekler. |
+| **Google Drive Sıfır Kayıplı Aktarıcı (`drive_aktarici.py`)** | Bilgisayara daha önceden indirilmiş binlerce dosyayı (`UYAP_Indirilenler`) klasör hiyerarşisini milimetrik koruyarak Google Drive'a (`G:\Drive'ım\UYAP_Arsiv`) aktarır; `uyap_katalog.db` içindeki 4.400+ dosya yolunu otomatik olarak Drive yoluna günceller. |
+| **Tek Veri Tabanı Mimarisi (`uyap_katalog.db`)** | Eski CSV/JSON kalıntıları kaldırılarak `tebligat` ve `durusma` tabloları SQLite'a dahil edildi. `cloud_backup()` API'si ile veritabanı kilitlenmeden anlık olarak Drive'a yedeklenir. |
+| **Google Drive Hibrit Mimarisi** | Dosyalar bulutta Stream modunda durur; MacBook, Laptop ve telefonda **0 MB disk alanı kaplar**. Cihazlar mükerrer kontrolünü dosyalardan değil, sadece ~70 MB'lık `uyap_katalog_yedek.db` snapshot'ından yapar. |
+
+---
+
+## ☁️ Google Drive Hibrit Mimarisi: Her Cihazdan 0 MB Depolama ile Erişim
+
+Bu sistemin en büyük avantajı, **hiçbir cihazınıza on binlerce dosyayı (onlarca GB arşivi) tek tek indirmek zorunda kalmamanızdır**:
+
+1. **MacBook ve Dizüstü Bilgisayarlar:**
+   - Google Drive masaüstü uygulamasında **"Dosyaları Akış Olarak Kullan (Stream files)"** seçilidir.
+   - Tüm mahkemeler ve evraklar Finder/Dosya Gezgini'nde sanal sürücü (`G:\` veya `CloudStorage`) olarak görünür ancak **yerel SSD'de 0 MB yer kaplar**.
+   - Bir PDF'e çift tıkladığınız anda Google Drive sadece o tek belgeyi saniyesinde internetten açar.
+2. **Akıllı Telefonlar (Android & iPhone):**
+   - Resmi Google Drive uygulamasında `UYAP_Arsiv` klasörüne girip dilediğiniz evrakı anında okuyabilirsiniz. Telefona hiçbir şey önceden indirilmez.
+3. **Mükerrer Kontrolü Neden Dosya İndirmeden Çalışır?**
+   - Telefondan (Termux) veya laptoptan program çalıştırıldığında, diskteki dosyalara bakmaz.
+   - Google Drive'daki küçük `uyap_katalog_yedek.db` veritabanı snapshot'ını okur.
+   - Hangi evrakın daha önce indirildiğini anında bilir; eski dosyaları indirmeden sadece yeni gelen evrakı çeker ve Drive'a yükler.
+
+### 🔄 Eski İndirmeleri Google Drive'a Aktarma (`drive_aktarici.py`)
+Eski yerel indirmelerinizi klasör yapısını ve veritabanı yollarını bozmadan aktarmak için:
+```cmd
+# 1. Simülasyon (Değişiklik yapmadan kontrol et):
+python drive_aktarici.py --dry-run
+
+# 2. Gerçek aktarımı başlat:
+python drive_aktarici.py
+```
+
+---
+
+## 🤖 Nöbetçi Bot & Telegram Bildirimleri (`uyap_watcher.py`)
+
+Avukatın UYAP'ta beklemesine gerek kalmadan yeni evrakları ve duruşmaları telefona bildiren nöbetçi servis:
+
+### 1. Telegram Bot Kurulumu (1 Seferlik)
+```cmd
+python uyap_watcher.py --setup
+```
+1. Telegram'da `@BotFather` ile bot açıp `Token` alın.
+2. `@userinfobot` ile kendi `Chat ID` numaranızı öğrenin.
+3. Sihirbaza girin; telefonunuza anında bir test bildirimi gönderilecektir.
+
+### 2. Nöbetçiyi Çalıştırma
+```cmd
+# Normal Nöbetçi Modu (Her 30 dakikada bir kontrol eder, 3 dk'da bir oturumu canlı tutar):
+python uyap_watcher.py
+
+# Google Drive Eşitlemeli Mod (Yeni inenleri Drive'a kopyalar ve DB yedeğini tazeler):
+python uyap_watcher.py --drive-dir "G:\Drive'ım\UYAP_Arsiv"
+```
+
+---
+
+## 🗺️ Gelecek Yol Haritası (Neler Yapacağız?)
+
+- [x] **Sürüm 3.0:** Masaüstü GUI, üç durumlu filtreler, Havelsan UDF->PDF, sağ tık dönüştürücü.
+- [x] **Sürüm 3.1:** Tek SQLite veritabanı (`uyap_katalog.db`), Google Drive sıfır kayıplı aktarıcı (`drive_aktarici.py`), Nöbetçi Bot (`uyap_watcher.py`), Keep-Alive pinger, Telegram bildirimleri ve hukuki süre hesabı.
+- [ ] **Yerel Hukuk AI & RAG Motoru:** İndirilen yüz binlerce sayfa PDF metni üzerinde yerel LLM (Ollama / Llama-3) veya Claude API ile semantik arama ("Tanık beyanlarındaki çelişkiler", "Hesap bilirkişi raporundaki hatalar").
+- [ ] **Otomatik Duruşma / Ara Karar Ayıklayıcı:** Duruşma zaptı indiğinde içerisindeki kesin süreleri ve ara kararları regex/NLP ile ayıklayıp doğrudan takvime işleyen asistan.
+- [ ] **Tailscale Özel Ağ Modu:** Bulut sağlayıcılarına ihtiyaç duymadan ofisteki bilgisayara doğrudan telefon/laptoptan uçtan uca şifreli VPN tüneli.
+
+---
+
 ## 📥 Kurulum
 
 ### Windows 10/11 (önerilen)

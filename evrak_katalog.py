@@ -156,6 +156,43 @@ CREATE INDEX IF NOT EXISTS ix_e_parent ON evrak(parent_skey);
 CREATE INDEX IF NOT EXISTS ix_e_ust ON evrak(ust_tur);
 CREATE INDEX IF NOT EXISTS ix_ed_dkey ON evrak_dosya(dkey);
 CREATE VIRTUAL TABLE IF NOT EXISTS evrak_fts USING fts5(metin, tokenize="unicode61 remove_diacritics 2");
+CREATE TABLE IF NOT EXISTS tebligat(
+  id INTEGER PRIMARY KEY,
+  barkod_delil TEXT UNIQUE,
+  dkey TEXT,
+  birim TEXT,
+  dosya_no TEXT,
+  muvekkil TEXT,
+  muhatap TEXT,
+  tebligat_turu TEXT,
+  gonderim_tarihi TEXT,
+  teblig_tarihi TEXT,
+  sonuc TEXT,
+  yasal_sure_notu TEXT,
+  evrak_id TEXT,
+  evrak_adi TEXT,
+  path TEXT,
+  pdf_path TEXT,
+  ozet TEXT,
+  durum TEXT DEFAULT 'yeni',
+  eklenme TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_teb_dkey ON tebligat(dkey);
+CREATE INDEX IF NOT EXISTS ix_teb_barkod ON tebligat(barkod_delil);
+
+CREATE TABLE IF NOT EXISTS durusma(
+  id INTEGER PRIMARY KEY,
+  dkey TEXT,
+  birim TEXT,
+  dosya_no TEXT,
+  tarih TEXT,
+  saat TEXT,
+  yer TEXT,
+  aciklama TEXT,
+  durum TEXT DEFAULT 'bekliyor',
+  UNIQUE(dkey, tarih, saat)
+);
+CREATE INDEX IF NOT EXISTS ix_dur_tarih ON durusma(tarih);
 """
 
 DURUMLAR = {
@@ -663,6 +700,84 @@ class Katalog:
         with self.db:
             self.db.execute("DELETE FROM evrak_fts WHERE rowid=?", (eid,))
             self.db.execute("INSERT INTO evrak_fts(rowid, metin) VALUES(?,?)", (eid, text[:200000]))
+
+    def upsert_tebligat(self, item: dict) -> int:
+        now = dt.datetime.now().isoformat()[:19]
+        barkod = str(item.get("Barkod_Veya_Delil_No") or item.get("barkod_delil") or "").strip()
+        if not barkod:
+            barkod = f"TEB_{item.get('Evrak_Id') or item.get('evrak_id') or now}"
+        with self.db:
+            cur = self.db.execute(
+                """INSERT INTO tebligat(
+                     barkod_delil, dkey, birim, dosya_no, muvekkil, muhatap,
+                     tebligat_turu, gonderim_tarihi, teblig_tarihi, sonuc,
+                     yasal_sure_notu, evrak_id, evrak_adi, path, pdf_path,
+                     ozet, durum, eklenme
+                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(barkod_delil) DO UPDATE SET
+                     teblig_tarihi=COALESCE(excluded.teblig_tarihi, tebligat.teblig_tarihi),
+                     sonuc=COALESCE(excluded.sonuc, tebligat.sonuc),
+                     yasal_sure_notu=COALESCE(excluded.yasal_sure_notu, tebligat.yasal_sure_notu),
+                     pdf_path=COALESCE(excluded.pdf_path, tebligat.pdf_path),
+                     path=COALESCE(excluded.path, tebligat.path),
+                     ozet=COALESCE(excluded.ozet, tebligat.ozet)""",
+                (
+                    barkod,
+                    self.dkey_of(str(item.get("Birim_Adi") or item.get("birim") or ""), str(item.get("Dosya_No") or item.get("dosya_no") or "")),
+                    str(item.get("Birim_Adi") or item.get("birim") or ""),
+                    str(item.get("Dosya_No") or item.get("dosya_no") or ""),
+                    str(item.get("Dosyadaki_Muvekkil") or item.get("muvekkil") or ""),
+                    str(item.get("Tebligat_Muhatabi") or item.get("muhatap") or ""),
+                    str(item.get("Tebligat_Turu") or item.get("tebligat_turu") or ""),
+                    str(item.get("Gonderim_Tarihi") or item.get("gonderim_tarihi") or ""),
+                    str(item.get("Hukuki_Teblig_Tarihi") or item.get("teblig_tarihi") or ""),
+                    str(item.get("Teblig_Durumu_Sonuc") or item.get("sonuc") or ""),
+                    str(item.get("Yasal_Sure_Hesabi_Notu") or item.get("yasal_sure_notu") or ""),
+                    str(item.get("Evrak_Id") or item.get("evrak_id") or ""),
+                    str(item.get("Evrak_Adi") or item.get("evrak_adi") or ""),
+                    str(item.get("Dosya_Yolu") or item.get("path") or ""),
+                    str(item.get("pdf_path") or ""),
+                    str(item.get("Detayli_Icerik_Ozeti") or item.get("ozet") or ""),
+                    str(item.get("durum") or "yeni"),
+                    now,
+                )
+            )
+            return cur.lastrowid or 0
+
+    def upsert_durusma(self, item: dict) -> int:
+        birim = str(item.get("birim") or item.get("birimAdi") or item.get("mahkeme") or "")
+        dno = str(item.get("dosyaNo") or item.get("dosya_no") or "")
+        tarih = str(item.get("tarih") or item.get("durusmaTarihi") or "")
+        saat = str(item.get("saat") or item.get("durusmaSaati") or "")
+        yer = str(item.get("yer") or item.get("durusmaYeri") or item.get("salon") or "")
+        acik = str(item.get("aciklama") or item.get("durusmaAciklama") or "")
+        dkey = self.dkey_of(birim, dno)
+        with self.db:
+            cur = self.db.execute(
+                """INSERT INTO durusma(dkey, birim, dosya_no, tarih, saat, yer, aciklama, durum)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, 'bekliyor')
+                   ON CONFLICT(dkey, tarih, saat) DO UPDATE SET
+                     yer=excluded.yer, aciklama=excluded.aciklama""",
+                (dkey, birim, dno, tarih, saat, yer, acik)
+            )
+            return cur.lastrowid or 0
+
+    def cloud_backup(self, target_path: Path | str) -> bool:
+        """SQLite yerleşik backup API'si ile çalışan veritabanını kilitlemeden
+        Google Drive veya hedef klasöre tutarlı anlık yedek çıkarır."""
+        try:
+            target = Path(target_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_target = target.with_suffix(".tmp.db")
+            with sqlite3.connect(str(tmp_target)) as dst:
+                self.db.backup(dst, pages=100)
+            if target.exists():
+                target.unlink()
+            tmp_target.rename(target)
+            return True
+        except Exception as e:
+            klog.error("Cloud backup hatası: %s", e)
+            return False
 
 
 # ---------------------------------------------------------------------------

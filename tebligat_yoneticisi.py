@@ -316,7 +316,15 @@ def record_tebligat_to_csv(item: dict, csv_paths: list = None) -> bool:
             else:
                 existing_rows.append(row_data)
 
-            # Dosyaya yaz
+            # 1. SQLite veritabanına kaydet (uyap_katalog.db)
+            try:
+                import evrak_katalog as ek
+                kat = ek.Katalog()
+                kat.upsert_tebligat(row_data)
+            except Exception:
+                pass
+
+            # 2. Excel uyumlu CSV kütüğüne yaz
             with open(target, "w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, delimiter=";")
                 writer.writeheader()
