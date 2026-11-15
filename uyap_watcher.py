@@ -234,6 +234,7 @@ class UyapWatcher:
 
         new_doc_count = 0
         drive_dir = Path(self.config.get("google_drive_dir")) if self.config.get("google_drive_dir") else None
+        download_dir = drive_dir or Path(os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
 
         for case in open_cases:
             self.heartbeat()
@@ -243,86 +244,82 @@ class UyapWatcher:
                 continue
 
             try:
-                # UYAP'tan dosyanın güncel evrak listesini al
-                evrak_listesi = self.bridge.query_dosya_evraklar(dosya_id)
-                if not evrak_listesi:
+                # UYAP'tan dosyanın güncel evrak sayfalarını al
+                evrak_pages = self.bridge.query_dosya_evraklar(dosya_id)
+                if not evrak_pages:
                     time.sleep(1.0)
                     continue
 
-                # Kataloğa henüz işlenmemiş evrak var mı?
+                # Mevcut evrak kimlikleri (skey)
                 existing_skeys = {
                     r[0] for r in self.katalog.db.execute(
                         "SELECT skey FROM evrak WHERE dkey=?", (dkey,)
                     ).fetchall()
                 }
 
-                fresh_evraks = []
-                for ev in evrak_listesi:
-                    tur = str(ev.get("tur") or "")
-                    acik = str(ev.get("aciklama") or "")
-                    bno = str(ev.get("birimEvrakNo") or "")
-                    tarih = ek.iso_date(ev.get("tarih") or "")
-                    skey = f"M|{bno}|{tarih}|{ek.fold(tur)}"
-                    if skey not in existing_skeys:
-                        fresh_evraks.append(ev)
+                # Sayfaları kataloğa işle (tüm ekler ve gruplar dahil)
+                self.katalog.ingest_pages(dkey, evrak_pages, oturum="watcher")
 
-                if fresh_evraks:
-                    logger.info("🔔 [%s - %s] %d YENİ EVRAK BULUNDU!", case["birim"], case["dosya_no"], len(fresh_evraks))
-                    # Kataloğa ekle
-                    self.katalog.upsert_evraklar(dkey, fresh_evraks, grup=case["dosya_no"], oturum="watcher")
+                # Sadece bu işlemle YENİ eklenen veya henüz indirilmemiş evrakları filtrele
+                cur = self.katalog.db.execute(
+                    "SELECT * FROM evrak WHERE dkey=? ORDER BY id ASC", (dkey,)
+                )
+                all_case_docs = cur.fetchall()
 
-                    # İndirme ve Telegram bildirimi
-                    for ev in fresh_evraks:
-                        tur = str(ev.get("tur") or "Evrak")
-                        acik = str(ev.get("aciklama") or "")
-                        gonderen = str(ev.get("gonderenYerKisi") or "")
-                        tarih = ek.iso_date(ev.get("tarih") or "")
+                truly_fresh = []
+                for row in all_case_docs:
+                    skey = row["skey"]
+                    # 1. Zaten indirilmişse veya mükerrerse atla
+                    if row["durum"] in ("indirildi", "mukerrer"):
+                        continue
 
-                        # Evrakı indir
-                        row = self.katalog.db.execute(
-                            "SELECT * FROM evrak WHERE dkey=? ORDER BY id DESC LIMIT 1", (dkey,)
-                        ).fetchone()
+                    # 2. Google Drive / diskte hedef PDF zaten var mı kontrol et!
+                    target_pdf = ek.target_path_for(row, download_dir / "DAVA_EVRAKLARI", ".pdf")
+                    if target_pdf.exists() and target_pdf.stat().st_size > 0:
+                        # Drive'da zaten var! 'indirildi' olarak işaretle ve sessizce geç
+                        self.katalog.set_result(row["id"], durum="indirildi", pdf_path=str(target_pdf))
+                        continue
 
+                    # 3. Daha önce mevcut skey'ler arasındaysa da atla (eski evrak)
+                    if skey in existing_skeys:
+                        continue
+
+                    truly_fresh.append((row, target_pdf))
+
+                if truly_fresh:
+                    logger.info("🔔 [%s - %s] %d GERÇEKTEN YENİ EVRAK BULUNDU!", case["birim"], case["dosya_no"], len(truly_fresh))
+
+                    for row, target_pdf in truly_fresh:
+                        tur = str(row["tur"] or "Evrak")
+                        acik = str(row["aciklama"] or "")
+                        gonderen = str(row["gonderen"] or "")
+                        tarih = str(row["tarih"] or "")
+
+                        # Evrakı UYAP'tan indir
+                        target_pdf.parent.mkdir(parents=True, exist_ok=True)
+                        doc_params = {
+                            "evrakId": row["evrak_id"],
+                            "dosyaId": dosya_id,
+                            "tur": tur,
+                        }
+                        res = self.bridge.download_document(doc_params)
                         pdf_path = None
-                        if row:
-                            # UYAP'tan indir
-                            download_dir = Path(os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
-                            target_pdf = ek.target_path_for(row, download_dir / "DAVA_EVRAKLARI", ".pdf")
-                            target_pdf.parent.mkdir(parents=True, exist_ok=True)
+                        if res and res.get("data"):
+                            raw_bytes = res["data"]
+                            ext = res.get("ext", ".udf")
+                            target_raw = target_pdf.with_suffix(ext)
+                            target_raw.write_bytes(raw_bytes)
 
-                            doc_params = {
-                                "evrakId": ev.get("evrakId"),
-                                "dosyaId": dosya_id,
-                                "tur": tur,
-                            }
-                            res = self.bridge.download_document(doc_params)
-                            if res and res.get("data"):
-                                raw_bytes = res["data"]
-                                ext = res.get("ext", ".udf")
-                                target_raw = target_pdf.with_suffix(ext)
-                                target_raw.write_bytes(raw_bytes)
+                            # PDF'e dönüştür
+                            if ext == ".pdf":
+                                pdf_path = target_raw
+                            elif ext == ".udf":
+                                pdf_path = dn.donustur(target_raw)
+                            elif ext in (".tif", ".tiff"):
+                                pdf_path = ek.tiff_to_pdf(target_raw)
 
-                                # PDF'e dönüştür
-                                if ext == ".pdf":
-                                    pdf_path = target_raw
-                                elif ext == ".udf":
-                                    pdf_path = dn.donustur(target_raw)
-                                elif ext in (".tif", ".tiff"):
-                                    pdf_path = ek.tiff_to_pdf(target_raw)
-
-                                # Veritabanında güncelle
-                                self.katalog.set_result(row["id"], durum="indirildi", path=str(target_raw), pdf_path=str(pdf_path or ""))
-
-                                # Google Drive eşitlemesi varsa kopyala
-                                if drive_dir and pdf_path and pdf_path.exists():
-                                    try:
-                                        rel = pdf_path.relative_to(download_dir)
-                                        drv_target = drive_dir / rel
-                                        drv_target.parent.mkdir(parents=True, exist_ok=True)
-                                        import shutil
-                                        shutil.copy2(pdf_path, drv_target)
-                                    except Exception as ed:
-                                        logger.debug("Drive kopyalama: %s", ed)
+                            # Veritabanında güncelle
+                            self.katalog.set_result(row["id"], durum="indirildi", path=str(target_raw), pdf_path=str(pdf_path or ""))
 
                         # Yasal süre hesabı
                         sure_bilgisi = calculate_legal_deadline(tur, acik)
