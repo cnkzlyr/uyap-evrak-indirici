@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) 2026 Av. Can KIZILYAR. Tüm hakları saklıdır. / All rights reserved.
-"""
+r"""
 UYAP Doğrudan Google Drive Bulut Entegratörü
 ===========================================
 Bilgisayarınız kapalıyken bile telefonunuzdan (Android / Termux), laptopunuzdan

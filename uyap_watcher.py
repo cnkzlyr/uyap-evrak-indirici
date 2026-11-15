@@ -254,6 +254,7 @@ class UyapWatcher:
             "total_docs": 0,
             "already_in_drive": 0,
             "filtered_category": 0,
+            "old_existing": 0,
             "new_downloaded": 0,
             "elapsed_seconds": 0.0,
         }
@@ -277,7 +278,7 @@ class UyapWatcher:
                     time.sleep(1.0)
                     continue
 
-                # Mevcut evrak kimlikleri (skey)
+                # Bu dosyanın tarama öncesinde veritabanında bilinen mevcut evrak kimlikleri (skey)
                 existing_skeys = {
                     r[0] for r in self.katalog.db.execute(
                         "SELECT skey FROM evrak WHERE dkey=?", (dkey,)
@@ -287,9 +288,14 @@ class UyapWatcher:
                 # Sayfaları kataloğa işle (tüm ekler ve gruplar dahil)
                 self.katalog.ingest_pages(dkey, evrak_pages, oturum="watcher")
 
-                # Sadece bu işlemle YENİ eklenen veya henüz indirilmemiş evrakları filtrele
+                # Dosya bilgileriyle (yargi, birim, dosya_no) birleştirilmiş evrak listesi
                 cur = self.katalog.db.execute(
-                    "SELECT * FROM evrak WHERE dkey=? ORDER BY id ASC", (dkey,)
+                    """SELECT e.*, d.yargi, d.birim, d.dosya_no
+                       FROM evrak e
+                       JOIN dosya d ON e.dkey = d.dkey
+                       WHERE e.dkey = ?
+                       ORDER BY e.id ASC""",
+                    (dkey,)
                 )
                 all_case_docs = cur.fetchall()
                 stats["total_docs"] += len(all_case_docs)
@@ -300,31 +306,41 @@ class UyapWatcher:
 
                 for row in all_case_docs:
                     skey = row["skey"]
-                    target_pdf = ek.target_path_for(row, download_dir / "DAVA_EVRAKLARI", ".pdf")
 
-                    # 1. Zaten indirilmişse veya mükerrerse
+                    # 1. Zaten indirilmiş veya mükerrer olarak işaretlenmişse
                     if row["durum"] in ("indirildi", "mukerrer"):
                         stats["already_in_drive"] += 1
                         continue
 
-                    # 2. Google Drive / diskte hedef PDF fiziken mevcut mu?
-                    if target_pdf.exists() and target_pdf.stat().st_size > 0:
-                        # Drive'da zaten var! 'indirildi' olarak işaretle ve sessizce geç
-                        self.katalog.set_result(row["id"], durum="indirildi", pdf_path=str(target_pdf))
-                        stats["already_in_drive"] += 1
-                        continue
+                    # 2. Veritabanında kayıtlı pdf_path varsa ve fiziken diskte/Drive'da mevcutsa
+                    if row["pdf_path"]:
+                        p_check = Path(row["pdf_path"])
+                        if p_check.exists() and p_check.stat().st_size > 0:
+                            stats["already_in_drive"] += 1
+                            continue
 
-                    # 3. Kategori Filtresi: Yalnızca kullanıcının ilgilendiği hayati evraklar!
+                    # 3. Kategori Filtresi: Yalnızca kullanıcının ilgilendiği hayati evraklar
                     kat = str(row["kategori"] or row["ust_kategori"] or "").lower()
                     if not allow_all and kat and kat not in watched_cats:
                         stats["filtered_category"] += 1
                         continue
 
-                    # 4. Daha önce mevcut skey'ler arasındaysa da atla (eski evrak)
-                    if skey in existing_skeys:
+                    # 4. Google Drive hedef yolu
+                    target_pdf = ek.target_path_for(row, download_dir / "DAVA_EVRAKLARI", ".pdf")
+
+                    # 5. Google Drive / diskte hedef PDF fiziken mevcut mu?
+                    if target_pdf.exists() and target_pdf.stat().st_size > 0:
+                        self.katalog.set_result(row["id"], durum="indirildi", pdf_path=str(target_pdf))
                         stats["already_in_drive"] += 1
                         continue
 
+                    # 6. Bu evrak daha önceki taramalarda zaten veri tabanında mevcut muydu?
+                    # (Yani Can Bey'in geçmişte indirmediği eski evraklar)
+                    if skey in existing_skeys:
+                        stats["old_existing"] += 1
+                        continue
+
+                    # 7. UYAP'a bu döngüde İLK KEZ düşmüş, hayati ve Drive'da olmayan GERÇEK YENİ EVRAK!
                     truly_fresh.append((row, target_pdf))
 
                 if truly_fresh:
@@ -401,13 +417,13 @@ class UyapWatcher:
                 self.katalog.db.commit()
 
             except Exception as e:
-                logger.debug("[%s] Evrak tarama atlandı: %s", case["dosya_no"], e)
+                logger.warning("[%s] Evrak tarama hatası: %s", case["dosya_no"], e)
 
             # Periyodik ilerleme gösterimi (Her 15 dosyada bir veya son dosyada)
             if idx % 15 == 0 or idx == total_cases:
                 pct = int((idx / total_cases) * 100)
                 logger.info(
-                    "⏳ İlerleme: [%d/%d - %%%d] | Taranan Evrak: %d | Drive'da Doğrulanan: %d | Filtrelenen (Rutin): %d | Yeni: %d",
+                    "⏳ İlerleme: [%d/%d - %%%d] | Taranan: %d | Drive'da Mevcut: %d | Filtrelenen (Rutin): %d | Yeni: %d",
                     idx, total_cases, pct, stats["total_docs"], stats["already_in_drive"], stats["filtered_category"], stats["new_downloaded"]
                 )
 
@@ -431,6 +447,7 @@ class UyapWatcher:
         logger.info("  📄 Taranan Toplam Evrak      : %d adet", stats["total_docs"])
         logger.info("  ☁️ Google Drive'da Mevcut    : %d adet", stats["already_in_drive"])
         logger.info("  🛡️ Filtrelenen (Rutin Evrak) : %d adet", stats["filtered_category"])
+        logger.info("  📦 Eski / Önceden Kayıtlı    : %d adet", stats["old_existing"])
         logger.info("  🔔 Yeni İndirilen & Bildirilen: %d adet", stats["new_downloaded"])
         logger.info("  ⏱️ Toplam Tarama Süresi      : %s", duration_str)
         logger.info("=" * 65)
@@ -449,6 +466,7 @@ class UyapWatcher:
                 f"📄 <b>Taranan Toplam Evrak:</b> {stats['total_docs']:,}\n"
                 f"☁️ <b>Google Drive'da Mevcut:</b> {stats['already_in_drive']:,}\n"
                 f"🛡️ <b>Filtrelenen Rutin Evrak:</b> {stats['filtered_category']:,}\n"
+                f"📦 <b>Eski / Arşiv Kayıtlı:</b> {stats['old_existing']:,}\n"
                 f"🔔 <b>Yeni İndirilen Evrak:</b> {stats['new_downloaded']}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⏳ <b>Sonraki Kontrol:</b> {next_time} ({next_mins} dk sonra)"
