@@ -192,6 +192,11 @@ class UyapWatcher:
             config.get("telegram_token", ""),
             config.get("telegram_chat_id", "")
         )
+        from google_drive_entegrasyonu import GoogleDriveCloudClient
+        self.cloud = GoogleDriveCloudClient(
+            webhook_url=config.get("google_drive_webhook", ""),
+            local_drive_dir=config.get("google_drive_dir", "")
+        )
         self.bridge = None
         self.last_keepalive = 0
         self.notified_durusmalar = set()
@@ -335,6 +340,11 @@ class UyapWatcher:
 
                             # Veritabanında güncelle
                             self.katalog.set_result(row["id"], durum="indirildi", path=str(target_raw), pdf_path=str(pdf_path or ""))
+
+                            # Google Drive / Bulut yüklemesi (Yerel G:\ veya Doğrudan Webhook)
+                            if pdf_path and pdf_path.exists():
+                                rel_folder = f"DAVA_EVRAKLARI/{case['birim']}/{case['dosya_no']}"
+                                self.cloud.upload_file(pdf_path, remote_folder_path=rel_folder)
 
                         # Yasal süre hesabı
                         sure_bilgisi = calculate_legal_deadline(tur, acik)
