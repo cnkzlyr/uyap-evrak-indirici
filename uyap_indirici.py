@@ -1318,6 +1318,10 @@ class UyapBrowserBridge:
 
     def is_logged_in(self) -> bool:
         """/kullanici_bilgileri.uyap ile aktif UYAP oturumunu kesin olarak doğrular."""
+        pages = self._list_pages() or []
+        uyap_tab = [t for t in pages if self.UYAP_HOST in (t.get("url") or "")]
+        if not uyap_tab:
+            return False
         js = """
         (async () => {
             try {
@@ -1343,6 +1347,10 @@ class UyapBrowserBridge:
     def check_login_and_user(self) -> dict:
         """UYAP oturumu açık mı, TCKN/Ad/Soyad nedir? Hata olursa {} döner, 'error' anahtarına
         anlaşılır neden yazılır (tarayıcı yok vb.)."""
+        pages = self._list_pages() or []
+        uyap_tab = [t for t in pages if self.UYAP_HOST in (t.get("url") or "")]
+        if not uyap_tab:
+            return {"error": "Açık UYAP sekmesi bulunamadı", "loginState": "false"}
         js = """
         (async () => {
             const url = window.location.href;
@@ -1386,27 +1394,57 @@ class UyapBrowserBridge:
     (() => {
         const url = location.href;
         const host = location.hostname;
+        const title = document.title || "";
         const text = (document.body && document.body.innerText) || "";
-        const vis = e => !!(e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length));
-        const btnText = b => (b.innerText || b.value || b.getAttribute('title') || '').trim();
-        const buttons = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn')).filter(vis);
+        const vis = e => !!(e && (e.offsetWidth || e.offsetHeight || (e.getClientRects && e.getClientRects().length)));
+        const btnText = b => (b.innerText || b.value || b.getAttribute('title') || b.getAttribute('aria-label') || '').trim();
+        const allBtns = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn, a[role=button], a.button, a')).filter(vis);
+        const buttons = allBtns.map(b => ({
+            tag: b.tagName.toLowerCase(),
+            id: b.id || '',
+            name: b.name || '',
+            type: b.type || '',
+            text: btnText(b)
+        })).filter(b => b.text.length > 0 && b.text.length < 60);
+
+        const btnTexts = buttons.map(b => b.text);
+
+        const trid = document.getElementById('tridField');
+        const gsm = document.getElementById('gsmField');
+        const isFormVis = !!(trid && gsm && vis(trid) && vis(gsm));
+
         const errEl = Array.from(document.querySelectorAll('.fieldError, .formErrors, .errorMessage, .alert-danger, .error-message'))
             .find(e => vis(e) && (e.innerText || '').trim().length > 3);
+
         let fp = "";
         const m = text.match(/Parmak\s*[İI]zi\s*[:\-]?\s*([A-F0-9]{2,4}(?:[\s\-]+[A-F0-9]{2,4})+)/i) ||
                   text.match(/\b([A-F0-9]{4}(?:\s+[A-F0-9]{4}){3,})\b/);
         if (m) fp = m[1].trim();
+
         let page = "other";
         if (host === "avukat.uyap.gov.tr") {
             page = url.includes("/giris") ? "uyap_giris" : "uyap_app";
-        } else if (host === "giris.turkiye.gov.tr") {
-            if (document.getElementById('tridField') && document.getElementById('gsmField')) page = "mobil_form";
-            else if (buttons.some(b => /İmzala/.test(btnText(b)))) page = "taahhut";
-            else if (fp || /bekleniyor|operat[öo]r/i.test(text)) page = "waiting";
-            else if (buttons.some(b => /^(Onayla|İzin Ver|Devam)/.test(btnText(b)))) page = "oauth";
-            else if (!url.includes("Mobil-Imza")) page = "edevlet_other";
+        } else if (host.includes("turkiye.gov.tr")) {
+            if (isFormVis) {
+                page = "mobil_form";
+            } else if (btnTexts.some(t => /İmzala/i.test(t))) {
+                page = "taahhut";
+            } else if (btnTexts.some(t => /^(Devam|Tamam|Onayla|İzin\s*Ver|Giriş|Uygulama|Sistem|İlerle|Kabul|Evet)/i.test(t))) {
+                page = "action_required";
+            } else if (fp || /bekleniyor|operat[öo]r|onaylanması/i.test(text)) {
+                page = "waiting";
+            } else if (!url.includes("Mobil-Imza")) {
+                page = "edevlet_other";
+            }
         }
-        return {url, page, fp, ready: document.readyState, error: errEl ? errEl.innerText.trim().slice(0, 300) : ""};
+        return {
+            url, host, title, page, fp,
+            buttons,
+            btnTexts,
+            textSnippet: text.slice(0, 300).replace(/\s+/g, ' '),
+            ready: document.readyState,
+            error: errEl ? errEl.innerText.trim().slice(0, 300) : ""
+        };
     })()
     """
 
@@ -1539,15 +1577,39 @@ class UyapBrowserBridge:
                 return {{ok: true}};
             }})()
             """
-            js_click = r"""
-            ((pattern) => {
-                const re = new RegExp(pattern);
-                const vis = e => !!(e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length));
-                const b = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn'))
-                    .filter(vis).find(x => re.test((x.innerText || x.value || '').trim()));
-                if (b) { b.click(); return true; }
-                return false;
-            })(%s)
+            js_smart_click = r"""
+            (() => {
+                const vis = e => !!(e && (e.offsetWidth || e.offsetHeight || (e.getClientRects && e.getClientRects().length)));
+                const btnText = b => (b.innerText || b.value || b.getAttribute('title') || b.getAttribute('aria-label') || '').trim();
+                const all = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn, a[role=button], a.button, a')).filter(vis);
+                
+                // 1. Birincil öncelik: Tam / başlangıç eşleşen onay ve devam aksiyon kelimeleri
+                const pat1 = /^(Devam(\s+Et)?|Tamam|Onayla(y[ıi]n)?|İzin\s*Ver|Uygulama(ya\s*Git)?|Sistem(e\s*Git)?|UYAP('a\s*Git)?|İlerle|Kabul(\s*Et)?|Giriş(\s*Yap)?|Evet)$/i;
+                let found = all.find(b => pat1.test(btnText(b)));
+                
+                // 2. İkincil öncelik: İçeren aksiyon kelimeleri (İptal/Vazgeç/Geri hariç)
+                if (!found) {
+                    const pat2 = /(Devam|Tamam|Onayla|İzin\s*Ver|Uygulama|Sisteme|UYAP|Kabul|İlerle)/i;
+                    found = all.find(b => pat2.test(btnText(b)) && !/(iptal|vazge[çc]|geri|hay[ıi]r|red)/i.test(btnText(b)));
+                }
+
+                // 3. Üçüncül öncelik: Submit veya btn-primary olup İptal olmayan herhangi bir buton
+                if (!found) {
+                    found = all.find(b => {
+                        const isSub = (b.type === 'submit' || (b.className && b.className.toString().includes('btn-primary')));
+                        const txt = btnText(b);
+                        return isSub && txt.length > 0 && !/(iptal|vazge[çc]|geri|hay[ıi]r|red)/i.test(txt);
+                    });
+                }
+
+                if (found) {
+                    const txt = btnText(found) || found.tagName;
+                    const id = found.id || found.name || '';
+                    found.click();
+                    return {clicked: true, text: txt, id: id, tag: found.tagName.toLowerCase()};
+                }
+                return {clicked: false};
+            })()
             """
 
             log_msg("[*] UYAP Mobil İmza girişi başlatılıyor...")
@@ -1560,34 +1622,73 @@ class UyapBrowserBridge:
             last_select = last_click = 0.0
             filled_at = signed_at = giris_since = 0.0
             fp_shown = waiting_shown = False
-            oauth_clicks = 0
             last_page = ""
+            btn_clicked_history = set()
+
             while time.time() < deadline:
                 time.sleep(1.0)
+
+                # 1. Oturum açıldı mı kontrol et
+                if self.is_logged_in():
+                    log_msg("✅ UYAP oturumu başarıyla doğrulandı!")
+                    break
+
                 try:
                     st = self.eval_js(self._JS_MOBIL_STATE, timeout=8.0, retries=0, target="auto") or {}
                 except UyapBrowserError as e:
                     return False, str(e)
                 except Exception:
-                    continue  # sayfa geçişi sırasında bağlam yok edilebilir
+                    continue  # sayfa geçişi / redirect sırasında context yok edilebilir
+
                 page = st.get("page", "")
-                if page != last_page:
-                    file_logger.info(f"Mobil İmza durum: {page}")
-                    last_page = page
-                if st.get("error") and page in ("mobil_form", "taahhut", "waiting", "edevlet_other") and filled_at:
-                    return False, f"e-Devlet: {st['error']}"
+                btn_texts = st.get("btnTexts", []) or [b.get("text", "") for b in st.get("buttons", [])]
+                curr_url = st.get("url", "")
+                title = st.get("title", "")
+
+                # Sayfa veya buton değiştiğinde canlı tarama ve kayıt tutma
+                state_sig = f"{page}|{curr_url}|{tuple(btn_texts)}"
+                if state_sig != last_page:
+                    last_page = state_sig
+                    file_logger.info(f"[e-Devlet Taraması] Sayfa: {page} | Başlık: '{title}' | URL: {curr_url} | Butonlar: {btn_texts}")
+
+                # Hata denetimi
+                if st.get("error") and page in ("mobil_form", "taahhut", "edevlet_other") and filled_at:
+                    if time.time() - filled_at > 20:
+                        return False, f"e-Devlet: {st['error']}"
+
+                # 2. MOBİL İMZA SONRASI ONAY VE DEVAM BUTONU TIKLAYICI (ÖĞRENME VE OTOMATİK TIKLAMA)
+                # Form gönderildikten sonra veya telefonda SIM PIN onaylandıktan sonra ekranda
+                # "Devam Et", "Tamam", "Onayla", "Uygulamaya Git" vb. butonlar çıkınca basılır
+                if filled_at:
+                    can_click = (page in ("action_required", "oauth", "edevlet_other") or 
+                                 any(re.search(r"(Devam|Tamam|Onayla|İzin|Uygulama|Sistem|Giriş|İlerle|Kabul)", str(t), re.I) for t in btn_texts))
+                    
+                    if can_click and time.time() - last_click > 1.5:
+                        last_click = time.time()
+                        click_res = self.eval_js(js_smart_click, timeout=6.0, retries=0, target="auto")
+                        if click_res and isinstance(click_res, dict) and click_res.get("clicked"):
+                            btxt = click_res.get("text", "")
+                            bid = click_res.get("id", "")
+                            key = f"{btxt}:{bid}"
+                            if key not in btn_clicked_history:
+                                btn_clicked_history.add(key)
+                                log_msg(f"[*] 🚀 e-Devlet onay butonuna basıldı: '{btxt}' (ID: #{bid or 'yok'}). UYAP'a yönlendiriliyor...")
+                                time.sleep(2.0)
+                                if self.is_logged_in():
+                                    break
+                                continue
 
                 giris_since = (giris_since or time.time()) if page == "uyap_giris" else 0.0
                 if page == "uyap_giris":
                     if filled_at:
-                        # e-Devlet'ten UYAP giriş sayfasına dönüldü: ya oturum açıldı ya da onay reddedildi
                         if self.is_logged_in():
                             break
-                        if time.time() - giris_since > 10:
+                        if time.time() - giris_since > 15:
                             return False, "Mobil İmza işlemi tamamlanmadan UYAP giriş sayfasına dönüldü (iptal / ret / süre aşımı)."
                     elif time.time() - last_select > 4:
                         last_select = time.time()
                         self.eval_js(self._JS_MOBIL_SELECT, timeout=8.0, retries=0, target="auto")
+
                 elif page == "mobil_form":
                     if not filled_at:
                         log_msg("[*] e-Devlet Mobil İmza formu dolduruluyor...")
@@ -1597,14 +1698,17 @@ class UyapBrowserBridge:
                         if fr.get("filled_only"):
                             return False, "Test: form dolduruldu, gönderilmedi."
                         filled_at = time.time()
-                    elif time.time() - filled_at > 25:
+                        log_msg("[*] Mobil İmza formu gönderildi, telefon bildirimi bekleniyor...")
+                    elif time.time() - filled_at > 45:
                         why = self._edevlet_page_message()
-                        return False, ("Mobil İmza formu gönderildi ama e-Devlet ilerlemedi"
-                                       + (f": {why}" if why else ". Bilgileri (TC, GSM, operatör) kontrol edin."))
+                        if why and ("zaman aşımı" in why.lower() or "hata" in why.lower()):
+                            return False, f"e-Devlet: {why}"
+
                 elif page == "taahhut":
-                    if time.time() - signed_at > 8:
+                    if time.time() - signed_at > 4:
                         signed_at = time.time()
-                        self.eval_js(js_click % json.dumps("İmzala"), timeout=8.0, retries=0, target="auto")
+                        self.eval_js(js_smart_click, timeout=8.0, retries=0, target="auto")
+
                 elif page == "waiting":
                     if st.get("fp") and not fp_shown:
                         fp_shown = True
@@ -1618,12 +1722,27 @@ class UyapBrowserBridge:
                         log_msg("  ⏳ Telefonunuza gelen bildirimde Mobil İmza PIN'inizi girip onaylayın.")
                         log_msg(f"  (Kalan süre ~{int(deadline - time.time())} sn. İptal için Ctrl+C)")
                         log_msg("=" * 70 + "\n")
-                elif page == "oauth":
-                    if time.time() - last_click > 3 and oauth_clicks < 5:
+
+                    # Waiting ekranındayken de onay/devam butonu çıkarsa hemen tıkla
+                    if time.time() - last_click > 2.0:
+                        click_res = self.eval_js(js_smart_click, timeout=5.0, retries=0, target="auto")
+                        if click_res and isinstance(click_res, dict) and click_res.get("clicked"):
+                            last_click = time.time()
+                            log_msg(f"[*] 🚀 Ekrandaki onay butonuna basıldı: '{click_res.get('text')}'")
+                            time.sleep(2.0)
+                            if self.is_logged_in():
+                                break
+
+                elif page in ("action_required", "oauth"):
+                    if time.time() - last_click > 2.0:
                         last_click = time.time()
-                        oauth_clicks += 1
-                        if self.eval_js(js_click % json.dumps("^(Onayla|İzin Ver)"), timeout=8.0, retries=0, target="auto"):
-                            log_msg("[*] e-Devlet izin ekranı onaylandı. UYAP'a yönlendiriliyor...")
+                        click_res = self.eval_js(js_smart_click, timeout=8.0, retries=0, target="auto")
+                        if click_res and isinstance(click_res, dict) and click_res.get("clicked"):
+                            log_msg(f"[*] 🚀 e-Devlet onay ekranı tamamlandı: '{click_res.get('text')}'. UYAP'a aktarılıyor...")
+                            time.sleep(2.0)
+                            if self.is_logged_in():
+                                break
+
                 elif page == "uyap_app":
                     if self.is_logged_in():
                         break
