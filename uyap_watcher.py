@@ -613,41 +613,78 @@ class UyapWatcher:
         except Exception as e:
             logger.debug("Duruşma sorgulama atlandı: %s", e)
 
+    def get_priority_backlog_ids(self, limit: int = 50) -> list[int]:
+        """Katalogdaki 526 binlik arşivden henüz indirilmemiş evrakları kesin HUKUKİ ÖNEM sırasına göre döner:
+        1. Kararlar (Gerekçeli Karar, Hüküm, İcra Emri, İhtiyati Tedbir/Haciz)
+        2. Duruşma Zabıtları ve Tensip Tutanakları (Ara kararlar, kesin süreler)
+        3. Bilirkişi Raporları ve Keşif Tutanakları
+        4. Tebligat ve Mazbatalar (Tüm tebligatlar ve mazbata parçaları)
+        5. Dilekçeler ve Layihalar (Dava, Cevap, İtiraz, Beyan)
+        6. İcra / Haciz / Satış İşlemleri
+        7. Müzekkereler ve Kurum Cevapları (SGK, Tapu, Banka)
+        8. Rutin Makbuzlar, Harçlar, Üst Yazılar
+        Her kategori içinde EN YENİ TARİHLİDEN ESKİYE (tarih DESC) sıralanır.
+        Mükerrer ve zaten indirilmiş olanlar kesinlikle filtrelenir.
+        """
+        sql = """
+        SELECT e.id
+        FROM evrak e
+        WHERE e.durum NOT IN ('indirildi', 'mukerrer')
+          AND (e.pdf_path IS NULL OR e.pdf_path = '')
+        ORDER BY 
+            CASE 
+                WHEN e.kategori IN ('karar') THEN 1
+                WHEN e.kategori IN ('durusma', 'tensip') THEN 2
+                WHEN e.kategori IN ('bilirkisi') THEN 3
+                WHEN e.kategori IN ('tebligat') THEN 4
+                WHEN e.kategori IN ('dilekce', 'layihalar') THEN 5
+                WHEN e.kategori IN ('icra') THEN 6
+                WHEN e.kategori IN ('muzekkere') THEN 7
+                ELSE 8
+            END ASC,
+            CASE WHEN e.tarih IS NOT NULL AND e.tarih != '' THEN e.tarih ELSE '1900-01-01' END DESC,
+            e.id DESC
+        LIMIT ?
+        """
+        cur = self.katalog.db.execute(sql, (limit,))
+        return [r[0] for r in cur.fetchall()]
+
     def get_missing_doc_ids(self, limit: int = 100) -> list[int]:
-        """GUI filtrelerini (.katalog_filtre.json) okuyarak indirilmeyi bekleyen evrak ID'lerini döner."""
+        """Varsa GUI filtrelerini (.katalog_filtre.json) okur; yoksa doğrudan HUKUKİ ÖNEM sırasına göre ID'leri döner."""
         filter_file = DATA_DIR / ".katalog_filtre.json"
         filt = {}
         if filter_file.exists():
             try:
                 saved = json.loads(filter_file.read_text(encoding="utf-8"))
-                filt = {k: saved.get("text", {}).get(k, "") for k in ["arama", "birim", "dosya_no", "muvekkil", "taraf", "baslangic", "bitis", "tur_haric"]}
-                filt["sadece_muvekkilli"] = saved.get("bool", {}).get("sadece_muvekkilli", False)
-                filt["kategori_ust"] = saved.get("bool", {}).get("kategori_ust", False)
-                filt["ek"] = saved.get("ek", "hepsi")
-                filt["ayni_ad_tek"] = saved.get("bool", {}).get("ayni_ad_tek", False)
-                filt["mukerrer_gizle"] = True
+                has_active = any(saved.get("text", {}).values()) or any(
+                    any(v != 0 for v in st.values()) for st in saved.get("tri", {}).values()
+                )
+                if has_active:
+                    filt = {k: saved.get("text", {}).get(k, "") for k in ["arama", "birim", "dosya_no", "muvekkil", "taraf", "baslangic", "bitis", "tur_haric"]}
+                    filt["sadece_muvekkilli"] = saved.get("bool", {}).get("sadece_muvekkilli", False)
+                    filt["kategori_ust"] = saved.get("bool", {}).get("kategori_ust", False)
+                    filt["ek"] = saved.get("ek", "hepsi")
+                    filt["ayni_ad_tek"] = saved.get("bool", {}).get("ayni_ad_tek", False)
+                    filt["mukerrer_gizle"] = True
 
-                sec = {}
-                for fk, st in saved.get("tri", {}).items():
-                    if fk == "durum":
-                        continue
-                    dahil = [k for k, v in st.items() if v == 1]
-                    haric = [k for k, v in st.items() if v == -1]
-                    if dahil or haric:
-                        sec[fk] = {"dahil": dahil, "haric": haric}
-                sec["durum"] = {"dahil": ["yeni"], "haric": ["indirildi", "mukerrer"]}
-                filt["sec"] = sec
+                    sec = {}
+                    for fk, st in saved.get("tri", {}).items():
+                        if fk == "durum":
+                            continue
+                        dahil = [k for k, v in st.items() if v == 1]
+                        haric = [k for k, v in st.items() if v == -1]
+                        if dahil or haric:
+                            sec[fk] = {"dahil": dahil, "haric": haric}
+                    sec["durum"] = {"dahil": ["yeni"], "haric": ["indirildi", "mukerrer"]}
+                    filt["sec"] = sec
+                    ids = self.katalog.ids_for(filt)
+                    if ids:
+                        return ids[:limit]
             except Exception as e:
                 logger.warning("Filtre dosyası okunamadı: %s", e)
 
-        if not filt:
-            filt = {
-                "sec": {"durum": {"dahil": ["yeni"], "haric": ["indirildi", "mukerrer"]}},
-                "mukerrer_gizle": True
-            }
-
-        ids = self.katalog.ids_for(filt)
-        return ids[:limit]
+        # Özel filtre yoksa veya tümü seçiliyse HUKUKİ ÖNEM SIRASINA GÖRE çek!
+        return self.get_priority_backlog_ids(limit=limit)
 
     def reconcile_missing_docs(self, max_batch: int = 40) -> int:
         """Katalogdaki tüm davalarda indirilmeyi bekleyen evrakları GUI filtrelerine (.katalog_filtre.json)
@@ -732,28 +769,41 @@ class UyapWatcher:
                 # 1. Oturum nabzı
                 self.heartbeat()
 
-                # 2. Öncelik 1: Eksik evrakları tamamlama döngüsü (Google Drive ile anında eşitleme)
-                if self.config.get("auto_download_missing", True):
-                    eksikler = self.reconcile_missing_docs(max_batch=40)
-                    if eksikler > 0:
-                        logger.info("Eksik Evrak Tamamlama: %d evrak Google Drive'a başarıyla aktarıldı.", eksikler)
-
-                # 3. Duruşma kontrolü (Önümüzdeki 7 gün)
-                self.check_upcoming_hearings()
-
-                # 3b. Canlı Duruşma, Yasal Süre, Ara Karar ve Portal İşlemlerim Analizi
-                self.sync_intel_and_deadlines(force=once)
-
-                # 4. Derdest açık dosyaların evrak kontrolü (canlı ilerleme bildirimiyle)
+                # 2. V.I.P. ŞERİT: Derdest açık dosyaların evrak kontrolü (Yeni evrak anında yakalanır, indirilir ve Drive'a aktarılır)
                 if self.config.get("check_open_cases", True):
                     stats = self.scan_open_cases()
                     yeni_sayisi = stats.get("new_downloaded", 0) if isinstance(stats, dict) else stats
                     if yeni_sayisi > 0:
-                        logger.info("Döngü tamamlandı: %d yeni evrak işlendi.", yeni_sayisi)
+                        logger.info("🔔 V.I.P. Nöbetçi: %d adet taze evrak yakalandı ve Google Drive'a yüklendi!", yeni_sayisi)
+
+                # 3. Duruşma kontrolü (Önümüzdeki 7 gün)
+                self.check_upcoming_hearings()
+
+                # 4. Canlı Duruşma, Yasal Süre, Ara Karar ve Portal İşlemlerim Analizi
+                self.sync_intel_and_deadlines(force=once)
+
+                # 5. ARŞİV EŞİTLEME ŞERİDİ: Kalan 506 bin evrakı kesin HUKUKİ ÖNEM sırasına göre Google Drive'a pompala
+                if self.config.get("auto_download_missing", True):
+                    eksikler = self.reconcile_missing_docs(max_batch=50)
+                    if eksikler > 0:
+                        logger.info("📦 Öncelikli Arşiv Eşitleme: %d evrak Google Drive'a aktarıldı.", eksikler)
 
                 if once:
                     logger.info("Tek seferlik nöbetçi kontrolü (--once) tamamlandı.")
                     break
+
+                # Kalan arşiv evrak kontrolü
+                cur_rem = self.katalog.db.execute(
+                    "SELECT COUNT(*) FROM evrak WHERE durum NOT IN ('indirildi', 'mukerrer') AND (pdf_path IS NULL OR pdf_path = '')"
+                )
+                kalan_evrak = cur_rem.fetchone()[0]
+
+                if kalan_evrak > 0:
+                    logger.info("⏳ UYAP Arşiv Eşitlemesi Devam Ediyor: Kalan %d evrak önem sırasıyla indiriliyor (Sonraki paket 3 sn)...", kalan_evrak)
+                    time.sleep(3.0)
+                else:
+                    logger.info("✨ Tüm UYAP arşivi Google Drive ile %100 eşitlendi! Tam Nöbetçi Bekleme Modu (%d dakika)...", self.config.get("interval_minutes", 15))
+                    time.sleep(interval_s)
 
             except KeyboardInterrupt:
                 logger.info("Nöbetçi kullanıcı tarafından durduruldu.")
@@ -762,9 +812,7 @@ class UyapWatcher:
                 logger.error("Nöbetçi döngü hatası: %s", e)
                 if once:
                     break
-
-            logger.info("Sonraki kontrol için bekleniyor (%d dakika)...", self.config.get("interval_minutes", 15))
-            time.sleep(interval_s)
+                time.sleep(10)
 
 
 # ---------------------------------------------------------------------------
