@@ -1308,6 +1308,7 @@ class UyapBrowserBridge:
             if not self.is_logged_in():
                 return False, "e-İmza imzası alındı ama UYAP oturumu doğrulanamadı. Tekrar deneyin."
             self.navigate(UYAP_BASE_URL + "/", target="uyap")
+            time.sleep(2.0)
             u = res.get("user") or {}
             full_name = f"{u.get('adi', '')} {u.get('soyadi', '')}".strip() or "Avukat"
             return True, f"e-İmza ile oturum açıldı ({full_name})"
@@ -1335,7 +1336,11 @@ class UyapBrowserBridge:
                 const d = await r.json().catch(() => null);
                 return Boolean(d && (d.tcKimlikNo || d.tckn));
             } catch(e) {
-                return false;
+                try {
+                    return localStorage.getItem("loginState") === "true";
+                } catch(e2) {
+                    return false;
+                }
             }
         })()
         """

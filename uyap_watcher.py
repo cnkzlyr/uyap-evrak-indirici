@@ -280,8 +280,15 @@ class UyapWatcher:
                         logger.warning("⚠️ e-İmza PIN'i (pin.txt) bulunamadı. Lütfen tarayıcıdan giriş yapınız.")
                         return False
 
-            # Son kontrol
-            if not self.bridge.is_logged_in():
+            # Son kontrol (sayfa yükleniyorsa 4 denemeyle doğrula)
+            logged_in = False
+            for _ in range(4):
+                if self.bridge.is_logged_in():
+                    logged_in = True
+                    break
+                time.sleep(1.5)
+
+            if not logged_in:
                 logger.warning("⚠️ UYAP oturumu doğrulanamadı. Lütfen giriş yapınız.")
                 return False
 
