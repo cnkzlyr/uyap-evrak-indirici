@@ -156,8 +156,20 @@ def main():
             run_cmd([PYTHON_EXE, "enrich_and_rename_documents.py"])
 
         elif secim == "11":
-            print("\n[*] Chrome / Edge UYAP Oturumu Başlatılıyor [Port 9223]...")
-            run_cmd([PYTHON_EXE, "uyap_indirici.py", "--browser-only"])
+            print("\n[*] UYAP Oturumu ve Tarayıcı Yönetimi")
+            print("  1) Tarayıcı Başlat [Port 9223]")
+            print("  2) Mobil İmza ile Giriş Yap [Android Termux & e-Devlet]")
+            print("  3) e-İmza ile Otomatik Giriş Yap [ArkSigner & pin.txt]")
+            print("  4) Aktif Oturum Durumunu Doğrula")
+            sub = input("Seçiminiz (1-4) [Varsayılan: 1]: ").strip() or "1"
+            if sub == "2":
+                run_cmd([PYTHON_EXE, "uyap_indirici.py", "--cli", "--mode", "login"])
+            elif sub == "3":
+                run_cmd([PYTHON_EXE, "uyap_indirici.py", "--relogin"])
+            elif sub == "4":
+                run_cmd([PYTHON_EXE, "uyap_indirici.py", "--check-login"])
+            else:
+                run_cmd([PYTHON_EXE, "uyap_indirici.py", "--browser-only"])
 
         elif secim == "12":
             print("\n[*] Evrak Kataloğu Açılıyor...")
