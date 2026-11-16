@@ -199,7 +199,15 @@ class UyapWatcher:
             webhook_url=config.get("google_drive_webhook", ""),
             local_drive_dir=config.get("google_drive_dir", "")
         )
-        self.download_dir = Path(config.get("google_drive_dir") or os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
+        import uyap_indirici as ui
+        self.is_termux = getattr(ui, "IS_TERMUX", False) or sys.platform != "win32"
+        gdrive_cfg = config.get("google_drive_dir", "")
+        if self.is_termux:
+            sd_cand = Path("/sdcard/UYAP_Indirilenler")
+            self.download_dir = sd_cand if sd_cand.parent.exists() else DATA_DIR / "UYAP_Indirilenler"
+        else:
+            self.download_dir = Path(gdrive_cfg or os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
+        self.download_dir.mkdir(parents=True, exist_ok=True)
         self.bridge = None
         self.motor = None
         self.last_keepalive = 0
@@ -349,8 +357,8 @@ class UyapWatcher:
             "elapsed_seconds": 0.0,
         }
 
-        drive_dir = Path(self.config.get("google_drive_dir")) if self.config.get("google_drive_dir") else None
-        download_dir = drive_dir or Path(os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
+        download_dir = self.download_dir
+        drive_dir = Path(self.config.get("google_drive_dir")) if (self.config.get("google_drive_dir") and not self.is_termux) else None
 
         for idx, case in enumerate(open_cases, 1):
             self.heartbeat()
@@ -453,6 +461,9 @@ class UyapWatcher:
                             row_up = self.katalog.get(row["id"])
                             if row_up and row_up["pdf_path"]:
                                 pdf_path = Path(row_up["pdf_path"])
+                                if pdf_path.exists() and self.cloud and self.cloud.is_configured:
+                                    rel_folder = f"DAVA_EVRAKLARI/{case['birim']}/{case['dosya_no']}"
+                                    self.cloud.upload_file(pdf_path, remote_folder_path=rel_folder)
 
                         # Yasal süre hesabı
                         sure_bilgisi = calculate_legal_deadline(tur, acik)
@@ -656,6 +667,17 @@ class UyapWatcher:
         stats = self.motor.download(target_ids)
         downloaded = stats.get("indirildi", 0) + stats.get("onbellek", 0)
         mukerrer = stats.get("mukerrer", 0)
+
+        # Google Drive bulut eşitlemesi (Telefon / Termux / Webhook / Yerel Klasör)
+        if self.cloud and self.cloud.is_configured:
+            for eid in target_ids:
+                row_up = self.katalog.get(eid)
+                if row_up and row_up.get("pdf_path"):
+                    p = Path(row_up["pdf_path"])
+                    if p.exists():
+                        rel_folder = f"DAVA_EVRAKLARI/{row_up.get('birim', 'Diger')}/{row_up.get('dosya_no', 'Genel')}"
+                        self.cloud.upload_file(p, remote_folder_path=rel_folder)
+
         logger.info("✅ Eksik Evrak Tamamlama Bitti: %d indirildi, %d mükerrer, %d hata.",
                     downloaded, mukerrer, stats.get("hata", 0))
         return downloaded
