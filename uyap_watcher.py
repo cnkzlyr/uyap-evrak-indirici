@@ -140,6 +140,7 @@ def load_config() -> dict:
     cfg.setdefault("check_tebligat", True)
     cfg.setdefault("telegram_summary_report", True)
     cfg.setdefault("watched_categories", DEFAULT_WATCHED_CATEGORIES)
+    cfg.setdefault("auto_download_missing", True)
     return cfg
 
 
@@ -198,9 +199,17 @@ class UyapWatcher:
             webhook_url=config.get("google_drive_webhook", ""),
             local_drive_dir=config.get("google_drive_dir", "")
         )
+        self.download_dir = Path(config.get("google_drive_dir") or os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
         self.bridge = None
+        self.motor = None
         self.last_keepalive = 0
+        self.last_intel_sync = 0
         self.notified_durusmalar = set()
+
+        from uyap_finans_safahat import UyapFinansSafahatManager
+        self.finans_mgr = UyapFinansSafahatManager()
+        from uyap_sure_analiz import UyapSureAnalizManager
+        self.sure_mgr = UyapSureAnalizManager()
 
     def connect_bridge(self) -> bool:
         """Açık olan UYAP Chrome oturumuna bağlanır."""
@@ -210,7 +219,16 @@ class UyapWatcher:
             ready, msg = self.bridge.ensure_ready("uyap")
             if not ready:
                 logger.warning("UYAP tarayıcısına bağlanılamadı: %s", msg)
+                if getattr(ui, "DEFAULT_E_IMZA_PIN", None):
+                    logger.info("e-İmza PIN ile otomatik UYAP oturumu açılıyor...")
+                    ok_re, msg_re = self.bridge.auto_relogin(pin=ui.DEFAULT_E_IMZA_PIN)
+                    if ok_re:
+                        ready, msg = self.bridge.ensure_ready("uyap")
+            if not ready:
                 return False
+            relogin_fn = (lambda: self.bridge.auto_relogin(pin=ui.DEFAULT_E_IMZA_PIN)[0]) if getattr(ui, "DEFAULT_E_IMZA_PIN", None) else None
+            self.motor = ek.Motor(self.bridge, self.katalog, self.download_dir, log=logger.info, relogin=relogin_fn)
+            self.finans_mgr.bridge = self.bridge
             logger.info("UYAP tarayıcı köprüsüne başarıyla bağlandı (Port: %d).", self.bridge.port)
             return True
         except Exception as e:
@@ -270,6 +288,7 @@ class UyapWatcher:
                 continue
 
             stats["processed_cases"] += 1
+            logger.info("  [%d/%d] 📂 %s (%s)...", idx, total_cases, case["birim"], case["dosya_no"])
 
             try:
                 # UYAP'tan dosyanın güncel evrak sayfalarını al
@@ -334,84 +353,77 @@ class UyapWatcher:
                         stats["already_in_drive"] += 1
                         continue
 
-                    # 6. Bu evrak daha önceki taramalarda zaten veri tabanında mevcut muydu?
-                    # (Yani Can Bey'in geçmişte indirmediği eski evraklar)
+                    # 6. Bu evrak daha önceki taramalarda zaten veritabanında mevcut muydu?
+                    # Açık dosya nöbetçisi YALNIZCA UYAP'a yeni düşmüş taze evrakları indirir ve bildirir.
+                    # Eski eksik evraklar zaten döngü başında reconcile_missing_docs tarafından GUI filtreleriyle tamamlanır.
                     if skey in existing_skeys:
                         stats["old_existing"] += 1
                         continue
 
-                    # 7. UYAP'a bu döngüde İLK KEZ düşmüş, hayati ve Drive'da olmayan GERÇEK YENİ EVRAK!
-                    truly_fresh.append((row, target_pdf))
+                    # 7. UYAP'a bu döngüde İLK KEZ düşmüş GERÇEK YENİ EVRAK!
+                    truly_fresh.append((row, target_pdf, True))
 
                 if truly_fresh:
-                    logger.info("🔔 [%s - %s] %d GERÇEKTEN YENİ EVRAK BULUNDU!", case["birim"], case["dosya_no"], len(truly_fresh))
+                    new_alerts = [x for x in truly_fresh if x[2]]
+                    if new_alerts:
+                        logger.info("🔔 [%s - %s] %d GERÇEKTEN YENİ EVRAK BULUNDU!", case["birim"], case["dosya_no"], len(new_alerts))
 
-                    for row, target_pdf in truly_fresh:
+                    for row, target_pdf, is_new_alert in truly_fresh:
                         tur = str(row["tur"] or "Evrak")
                         acik = str(row["aciklama"] or "")
                         gonderen = str(row["gonderen"] or "")
                         tarih = str(row["tarih"] or "")
 
-                        # Evrakı UYAP'tan indir
-                        target_pdf.parent.mkdir(parents=True, exist_ok=True)
-                        doc_params = {
-                            "evrakId": row["evrak_id"],
-                            "dosyaId": dosya_id,
-                            "tur": tur,
-                        }
-                        res = self.bridge.download_document(doc_params)
+                        # Evrakı Motor ile güvenli indir, PDF yap ve Google Drive'a eşitle
                         pdf_path = None
-                        if res and res.get("data"):
-                            raw_bytes = res["data"]
-                            ext = res.get("ext", ".udf")
-                            target_raw = target_pdf.with_suffix(ext)
-                            target_raw.write_bytes(raw_bytes)
-
-                            # PDF'e dönüştür
-                            if ext == ".pdf":
-                                pdf_path = target_raw
-                            elif ext == ".udf":
-                                pdf_path = dn.donustur(target_raw)
-                            elif ext in (".tif", ".tiff"):
-                                pdf_path = ek.tiff_to_pdf(target_raw)
-
-                            # Veritabanında güncelle
-                            self.katalog.set_result(row["id"], durum="indirildi", path=str(target_raw), pdf_path=str(pdf_path or ""))
-
-                            # Google Drive / Bulut yüklemesi (Yerel G:\ veya Doğrudan Webhook)
-                            if pdf_path and pdf_path.exists():
-                                rel_folder = f"DAVA_EVRAKLARI/{case['birim']}/{case['dosya_no']}"
-                                self.cloud.upload_file(pdf_path, remote_folder_path=rel_folder)
+                        if getattr(self, "motor", None):
+                            self.motor.download([row["id"]])
+                            row_up = self.katalog.get(row["id"])
+                            if row_up and row_up["pdf_path"]:
+                                pdf_path = Path(row_up["pdf_path"])
 
                         # Yasal süre hesabı
                         sure_bilgisi = calculate_legal_deadline(tur, acik)
 
-                        # Telegram Bildirimi Hazırla
-                        msg_lines = [
-                            f"🔔 <b>UYAP: Yeni Evrak Geldi!</b>",
-                            f"🏢 <b>Birim:</b> {case['birim']}",
-                            f"📁 <b>Dosya:</b> {case['dosya_no']}",
-                            f"📄 <b>Evrak Türü:</b> {tur}",
-                            f"📅 <b>Tarih:</b> {tarih}",
-                        ]
-                        if gonderen:
-                            msg_lines.append(f"👤 <b>Gönderen:</b> {gonderen}")
-                        if acik:
-                            msg_lines.append(f"📝 <b>Açıklama:</b> {acik}")
-                        if sure_bilgisi:
-                            msg_lines.append(f"\n{sure_bilgisi}")
+                        # Telegram Bildirimi Hazırla (SADECE gerçekten yeni evraklar için bildirim gönder!)
+                        if is_new_alert:
+                            msg_lines = [
+                                f"🔔 <b>UYAP: Yeni Evrak Geldi!</b>",
+                                f"🏢 <b>Birim:</b> {case['birim']}",
+                                f"📁 <b>Dosya:</b> {case['dosya_no']}",
+                                f"📄 <b>Evrak Türü:</b> {tur}",
+                                f"📅 <b>Tarih:</b> {tarih}",
+                            ]
+                            if gonderen:
+                                msg_lines.append(f"👤 <b>Gönderen:</b> {gonderen}")
+                            if acik:
+                                msg_lines.append(f"📝 <b>Açıklama:</b> {acik}")
+                            if sure_bilgisi:
+                                msg_lines.append(f"\n{sure_bilgisi}")
 
-                        msg_text = "\n".join(msg_lines)
+                            msg_text = "\n".join(msg_lines)
 
-                        # Telegram'a gönder (PDF varsa iliştir)
-                        if pdf_path and pdf_path.exists() and pdf_path.stat().st_size <= 45 * 1024 * 1024:
-                            self.tg.send_document(pdf_path, caption=msg_text)
-                        else:
-                            self.tg.send_message(msg_text)
+                            # Telegram'a gönder (PDF varsa iliştir)
+                            if pdf_path and pdf_path.exists() and pdf_path.stat().st_size <= 45 * 1024 * 1024:
+                                self.tg.send_document(pdf_path, caption=msg_text)
+                            else:
+                                self.tg.send_message(msg_text)
 
                         stats["new_downloaded"] += 1
 
                 # Taranma zamanını tazele
+                # Finans ve Safahat güncelle (yeni evrak düştüğünde anında mali durumu ve safahati tazele)
+                if truly_fresh:
+                    try:
+                        is_icra = "İcra" in (case["birim"] or "") or "Icra" in (case["birim"] or "")
+                        if is_icra:
+                            self.finans_mgr.fetch_icra_hesap(dosya_id, dkey, case["birim"], case["dosya_no"])
+                        else:
+                            self.finans_mgr.fetch_finans(dosya_id, dkey, case["birim"], case["dosya_no"])
+                            self.finans_mgr.fetch_safahat(dosya_id, dkey, case["birim"], case["dosya_no"])
+                    except Exception as fe:
+                        logger.debug("Finans/safahat tazeleme hatası: %s", fe)
+
                 now_str = dt.datetime.now().isoformat()[:19]
                 self.katalog.db.execute("UPDATE dosya SET taranma=? WHERE dkey=?", (now_str, dkey))
                 self.katalog.db.commit()
@@ -428,7 +440,7 @@ class UyapWatcher:
                 )
 
             # WAF'a takılmamak için nazik bekleme
-            time.sleep(1.5)
+            time.sleep(0.4)
 
         # Google Drive varsa veritabanı anlık snapshot'ını güncelle
         if drive_dir:
@@ -518,6 +530,85 @@ class UyapWatcher:
         except Exception as e:
             logger.debug("Duruşma sorgulama atlandı: %s", e)
 
+    def get_missing_doc_ids(self, limit: int = 100) -> list[int]:
+        """GUI filtrelerini (.katalog_filtre.json) okuyarak indirilmeyi bekleyen evrak ID'lerini döner."""
+        filter_file = DATA_DIR / ".katalog_filtre.json"
+        filt = {}
+        if filter_file.exists():
+            try:
+                saved = json.loads(filter_file.read_text(encoding="utf-8"))
+                filt = {k: saved.get("text", {}).get(k, "") for k in ["arama", "birim", "dosya_no", "muvekkil", "taraf", "baslangic", "bitis", "tur_haric"]}
+                filt["sadece_muvekkilli"] = saved.get("bool", {}).get("sadece_muvekkilli", False)
+                filt["kategori_ust"] = saved.get("bool", {}).get("kategori_ust", False)
+                filt["ek"] = saved.get("ek", "hepsi")
+                filt["ayni_ad_tek"] = saved.get("bool", {}).get("ayni_ad_tek", False)
+                filt["mukerrer_gizle"] = True
+
+                sec = {}
+                for fk, st in saved.get("tri", {}).items():
+                    if fk == "durum":
+                        continue
+                    dahil = [k for k, v in st.items() if v == 1]
+                    haric = [k for k, v in st.items() if v == -1]
+                    if dahil or haric:
+                        sec[fk] = {"dahil": dahil, "haric": haric}
+                sec["durum"] = {"dahil": ["yeni"], "haric": ["indirildi", "mukerrer"]}
+                filt["sec"] = sec
+            except Exception as e:
+                logger.warning("Filtre dosyası okunamadı: %s", e)
+
+        if not filt:
+            filt = {
+                "sec": {"durum": {"dahil": ["yeni"], "haric": ["indirildi", "mukerrer"]}},
+                "mukerrer_gizle": True
+            }
+
+        ids = self.katalog.ids_for(filt)
+        return ids[:limit]
+
+    def reconcile_missing_docs(self, max_batch: int = 40) -> int:
+        """Katalogdaki tüm davalarda indirilmeyi bekleyen evrakları GUI filtrelerine (.katalog_filtre.json)
+        uygun olarak sırayla indirir, PDF'e çevirir ve Google Drive'a eşitler."""
+        if not self.bridge:
+            return 0
+        if not self.motor:
+            relogin_fn = (lambda: self.bridge.auto_relogin(pin=ui.DEFAULT_E_IMZA_PIN)[0]) if getattr(ui, "DEFAULT_E_IMZA_PIN", None) else None
+            self.motor = ek.Motor(self.bridge, self.katalog, self.download_dir, log=logger.info, relogin=relogin_fn)
+
+        target_ids = self.get_missing_doc_ids(limit=max_batch)
+        if not target_ids:
+            logger.info("✨ Tüm evraklar güncel! İndirilmeyi bekleyen eksik evrak bulunamadı.")
+            return 0
+
+        logger.info("🔄 Eksik Evrak Tamamlayıcı: %d eksik evrak indiriliyor ve Google Drive'a eşitleniyor...", len(target_ids))
+        stats = self.motor.download(target_ids)
+        downloaded = stats.get("indirildi", 0) + stats.get("onbellek", 0)
+        mukerrer = stats.get("mukerrer", 0)
+        logger.info("✅ Eksik Evrak Tamamlama Bitti: %d indirildi, %d mükerrer, %d hata.",
+                    downloaded, mukerrer, stats.get("hata", 0))
+        return downloaded
+
+    def sync_intel_and_deadlines(self, force: bool = False) -> None:
+        """Süreleri, duruşmaları, ara kararları ve portal işlemlerini günceller; Telegram alarmı gönderir."""
+        now = time.time()
+        # En fazla 30 dakikada bir veya force olduğunda tara
+        if not force and (now - self.last_intel_sync < 1800):
+            return
+
+        try:
+            logger.info("📅 Canlı Duruşma, Yasal Süre, Ara Karar ve Portal İşlemlerim Analizi çalıştırılıyor...")
+            self.sure_mgr.scan_all(bridge=self.bridge)
+            self.finans_mgr.fetch_portal_islemlerim(days_back=14)
+            self.last_intel_sync = now
+
+            if self.tg.is_configured:
+                alert = self.sure_mgr.build_telegram_alert_message(max_days=3)
+                if alert:
+                    self.tg.send_message(alert)
+                    logger.info("📢 Yaklaşan kritik süreler Telegram üzerinden iletildi.")
+        except Exception as e:
+            logger.warning("İstihbarat ve süre senkronizasyon hatası: %s", e)
+
     def run_loop(self, once: bool = False) -> None:
         """Sürekli arka plan nöbet döngüsü veya tek seferlik tarama (--once)."""
         logger.info("=" * 65)
@@ -547,10 +638,19 @@ class UyapWatcher:
                 # 1. Oturum nabzı
                 self.heartbeat()
 
-                # 2. Duruşma kontrolü
+                # 2. Öncelik 1: Eksik evrakları tamamlama döngüsü (Google Drive ile anında eşitleme)
+                if self.config.get("auto_download_missing", True):
+                    eksikler = self.reconcile_missing_docs(max_batch=40)
+                    if eksikler > 0:
+                        logger.info("Eksik Evrak Tamamlama: %d evrak Google Drive'a başarıyla aktarıldı.", eksikler)
+
+                # 3. Duruşma kontrolü (Önümüzdeki 7 gün)
                 self.check_upcoming_hearings()
 
-                # 3. Derdest açık dosyaların evrak kontrolü
+                # 3b. Canlı Duruşma, Yasal Süre, Ara Karar ve Portal İşlemlerim Analizi
+                self.sync_intel_and_deadlines(force=once)
+
+                # 4. Derdest açık dosyaların evrak kontrolü (canlı ilerleme bildirimiyle)
                 if self.config.get("check_open_cases", True):
                     stats = self.scan_open_cases()
                     yeni_sayisi = stats.get("new_downloaded", 0) if isinstance(stats, dict) else stats
@@ -625,6 +725,8 @@ def main():
     parser.add_argument("--once", action="store_true", help="Tek bir tarama turu yap, raporla ve çık")
     parser.add_argument("--interval", type=int, default=None, help="Kontrol aralığı (dakika)")
     parser.add_argument("--drive-dir", type=str, default=None, help="Google Drive hedef klasörü")
+    parser.add_argument("--tamamla", action="store_true", help="Katalogdaki tüm eksik evrakları sırayla indirip Drive'a eşitler")
+    parser.add_argument("--no-tamamla", action="store_true", help="Eksik evrak tamamlama döngüsünü devre dışı bırakır")
     args = parser.parse_args()
 
     if args.setup:
@@ -636,6 +738,10 @@ def main():
         cfg["interval_minutes"] = args.interval
     if args.drive_dir:
         cfg["google_drive_dir"] = args.drive_dir
+    if args.tamamla:
+        cfg["auto_download_missing"] = True
+    elif args.no_tamamla:
+        cfg["auto_download_missing"] = False
 
     if args.test_telegram:
         tg = TelegramClient(cfg.get("telegram_token", ""), cfg.get("telegram_chat_id", ""))

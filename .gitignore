@@ -37,4 +37,6 @@ dist/
 build/
 .onbellek/
 loglar/
+scratch/
+*.ics
 *.spec.bak

@@ -18,11 +18,20 @@ echo "  5) Duruşma Takvimi Oluştur (.ics / Google Takvim + CSV)"
 echo "  6) Termux:X11 Grafik Arayüz Modu (Telefonda Pencere Açılır)"
 echo "  7) Arka Planda Başlat (Headless Chromium)"
 echo "  8) İndirilen UDF'leri PDF'e Dönüştür (Toplu Vektörel PDF)"
+echo "  9) UYAP Nöbetçi Bot (Arka Planda İzleme & Drive Eşitleme)"
+echo " 10) Hukuki Süre ve Görev Analizi (Duruşma + Ara Karar + Tebligat)"
+echo " 11) Notion ve TickTick Entegrasyon Paketini Üret (CSV + ICS)"
+echo " 12) Tebligat ve Mazbatalar (Fiziki PTT + UETS Sureli Tebligatlar)"
+echo "  0) Çıkış"
 echo ""
 echo "=================================================================="
-read -p "Seçiminiz (1-8) [Varsayılan: 1]: " secim
+read -p "Seçiminiz (0-12) [Varsayılan: 1]: " secim
 
 case "$secim" in
+    0)
+        echo "Çıkış yapıldı."
+        exit 0
+        ;;
     2)
         echo ""
         echo "[*] İşlemlerim - Geçmiş Yıllar / Özel Tarih Aralığı Seçildi"
@@ -161,6 +170,28 @@ case "$secim" in
         echo ""
         echo "[*] Tüm İndirilen UDF Belgeleri PDF Formatına Dönüştürülüyor..."
         ./udf_toplu_pdf.sh /sdcard/Download/UYAP_Indirilenler
+        ;;
+    9)
+        echo ""
+        echo "[*] UYAP Nöbetçi Bot (Arka Plan / Konsol Modu) başlatılıyor..."
+        read -p "Kontrol Sıklığı (Dakika) [Varsayılan: 15]: " intv
+        intv="${intv:-15}"
+        python3 uyap_watcher.py --interval "$intv"
+        ;;
+    10)
+        echo ""
+        echo "[*] Hukuki Süre ve Görev Analizi çalıştırılıyor..."
+        python3 uyap_sure_analiz.py
+        ;;
+    11)
+        echo ""
+        echo "[*] Notion ve TickTick Entegrasyon Paketleri üretiliyor..."
+        python3 uyap_entegrasyon.py
+        ;;
+    12)
+        echo ""
+        echo "[*] Tebligat ve Mazbata Yöneticisi başlatılıyor..."
+        python3 tebligat_yoneticisi.py
         ;;
     *)
         echo ""

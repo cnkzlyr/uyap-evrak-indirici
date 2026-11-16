@@ -1930,6 +1930,8 @@ class UyapBrowserBridge:
 
     def query_durusmalar(self, start_date_str: str, end_date_str: str) -> list:
         """avukat_durusma_sorgula_brd.ajx ile belirli tarih aralığındaki duruşmaları çeker."""
+        start_date_str = start_date_str.replace("/", ".")
+        end_date_str = end_date_str.replace("/", ".")
         js = f"""
         (async () => {{
             const resp = await fetch("/avukat_durusma_sorgula_brd.ajx", {{
@@ -4860,13 +4862,14 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Tara ve mükerrer kontrolü yap, hiçbir şey indirme (dava dosyası modları)")
     parser.add_argument("--browser-only",action="store_true", help="Sadece UYAP tarayıcısını (CDP portu açık, ayrı profil) başlat ve çık")
     parser.add_argument("--katalog", action="store_true", help="Evrak kataloğu arayüzü: tüm evrakları tara, filtrele, seçip bir kez indir")
+    parser.add_argument("--watcher", action="store_true", help="Kataloğu nöbetçi bot modu ile başlatır")
     parser.add_argument("--katalog-tara", action="store_true", help="Kataloğu terminalden güncelle (indirme yapmaz; sunucu/zamanlanmış görev için)")
 
     args = parser.parse_args()
 
     if args.katalog:
         import katalog_gui
-        katalog_gui.main()
+        katalog_gui.main(watcher_mode=args.watcher)
         return
 
     if args.katalog_tara:

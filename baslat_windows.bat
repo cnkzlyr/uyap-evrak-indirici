@@ -25,11 +25,15 @@ echo   9. Tebligat ve Sure Analizi Calistir [tebligat_takip_listesi.csv]
 echo  10. Evrak Zenginlestirme ve Akilli Isimlendirme [enrich_and_rename]
 echo  11. Chrome / Edge UYAP Oturumu Baslat [Port 9223]
 echo  12. EVRAK KATALOGU: Tara, Filtrele, Secip Bir Kez Indir [Pencere]
+echo  13. UYAP Nobetci Bot [Pencere / GUI - Canli Izleme ve Drive Esitleme]
+echo  14. UYAP Nobetci Bot [Terminal / Konsol - GUI Filtreleriyle Eksikleri Tamamla ve Drive]
+echo  15. Hukuki Sure ve Gorev Analizi [Canli Durusma + Ara Karar + Tebligat]
+echo  16. Notion ve TickTick Entegrasyon Paketini Uret [CSV + ICS]
 echo   0. Cikis
 echo.
 echo ==================================================================
 set secim=
-set /p secim="Seciminiz 0-12 [Varsayilan: 1]: "
+set /p secim="Seciminiz 0-16 [Varsayilan: 1]: "
 if "%secim%"=="" set secim=1
 if "%secim%"=="0" goto cikis
 
@@ -45,6 +49,10 @@ if "%secim%"=="9" goto opt9
 if "%secim%"=="10" goto opt10
 if "%secim%"=="11" goto opt11
 if "%secim%"=="12" goto opt12
+if "%secim%"=="13" goto opt13
+if "%secim%"=="14" goto opt14
+if "%secim%"=="15" goto opt15
+if "%secim%"=="16" goto opt16
 goto opt1
 
 :opt1
@@ -215,6 +223,43 @@ goto bitir
 echo.
 echo [*] Evrak Katalogu aciliyor...
 python uyap_indirici.py --katalog
+goto bitir
+
+:opt13
+echo.
+echo [*] UYAP Nobetci Bot (Pencereli / GUI Modu) baslatiliyor...
+python uyap_indirici.py --katalog --watcher
+goto bitir
+
+:opt14
+echo.
+echo ==================================================================
+echo   UYAP Nobetci Bot - Terminal / Konsol Modu
+echo   (GUI Filtreleri varsayilan alinir; yeni + eksik evraklar Drive'a aktarilir)
+echo ==================================================================
+echo.
+set /p intv="Kontrol Sikligi (Dakika) [Varsayilan: 15]: "
+if "%intv%"=="" set intv=15
+python uyap_watcher.py --interval %intv%
+goto bitir
+
+:opt15
+echo.
+echo ==================================================================
+echo   Hukuki Sure ve Gorev Analizi
+echo   (Canli UYAP Durusmalari + Durusma Zabti Ara Kararlari + Tebligatlar)
+echo ==================================================================
+echo.
+python uyap_sure_analiz.py
+goto bitir
+
+:opt16
+echo.
+echo ==================================================================
+echo   Notion ve TickTick Entegrasyon Paketini Uret
+echo ==================================================================
+echo.
+python uyap_entegrasyon.py
 goto bitir
 
 :bitir

@@ -246,11 +246,25 @@ class Katalog:
     def db(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
         if c is None:
-            c = sqlite3.connect(str(self.path), timeout=30)
+            c = sqlite3.connect(str(self.path), timeout=60)
             c.row_factory = sqlite3.Row
-            c.execute("PRAGMA busy_timeout=30000")
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA busy_timeout=60000")
+            c.execute("PRAGMA synchronous=NORMAL")
             self._local.conn = c
         return c
+
+    def _execute_with_retry(self, fn, max_retries: int = 12, delay: float = 0.5):
+        """Veritabanı kilitlenme (database is locked / busy) durumlarında otomatik yeniden dener."""
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except sqlite3.OperationalError as e:
+                err_str = str(e).lower()
+                if ("locked" in err_str or "busy" in err_str) and attempt < max_retries - 1:
+                    time.sleep(delay * (1 + attempt * 0.5))
+                    continue
+                raise
 
     # -------------------------------------------------------------- dosyalar
     @staticmethod
@@ -364,23 +378,25 @@ class Katalog:
 
         if not rows:
             return 0
-        with self.db:
-            self.db.executemany(
-                """INSERT INTO evrak(skey,dkey,grup,is_ek,parent_skey,sira,tur,ust_tur,aciklama,tarih,tip,
-                     gonderen,gonderen_dosya,birim_evrak_no,gercek_id,kategori,ust_kategori,uzanti,ad_anahtar,ara,
-                     evrak_id,oturum,ilk_gorulme,son_gorulme)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(skey) DO UPDATE SET evrak_id=excluded.evrak_id, oturum=excluded.oturum,
-                     son_gorulme=excluded.son_gorulme,
-                     -- Şifreli evrakId, görüldüğü dosyanın bağlamına aittir: ikisi birlikte güncellenir
-                     dkey=excluded.dkey""",
-                rows,
-            )
-            self.db.executemany("INSERT OR IGNORE INTO evrak_dosya(skey,dkey) VALUES(?,?)", links)
-            self.db.execute(
-                "UPDATE dosya SET evrak_sayisi=(SELECT COUNT(*) FROM evrak_dosya WHERE dkey=?) WHERE dkey=?",
-                (dkey, dkey),
-            )
+        def _do_ingest():
+            with self.db:
+                self.db.executemany(
+                    """INSERT INTO evrak(skey,dkey,grup,is_ek,parent_skey,sira,tur,ust_tur,aciklama,tarih,tip,
+                         gonderen,gonderen_dosya,birim_evrak_no,gercek_id,kategori,ust_kategori,uzanti,ad_anahtar,ara,
+                         evrak_id,oturum,ilk_gorulme,son_gorulme)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(skey) DO UPDATE SET evrak_id=excluded.evrak_id, oturum=excluded.oturum,
+                         son_gorulme=excluded.son_gorulme,
+                         -- Şifreli evrakId, görüldüğü dosyanın bağlamına aittir: ikisi birlikte güncellenir
+                         dkey=excluded.dkey""",
+                    rows,
+                )
+                self.db.executemany("INSERT OR IGNORE INTO evrak_dosya(skey,dkey) VALUES(?,?)", links)
+                self.db.execute(
+                    "UPDATE dosya SET evrak_sayisi=(SELECT COUNT(*) FROM evrak_dosya WHERE dkey=?) WHERE dkey=?",
+                    (dkey, dkey),
+                )
+        self._execute_with_retry(_do_ingest)
         return len(rows)
 
     def sync_disk(self) -> int:
@@ -677,29 +693,33 @@ class Katalog:
             f"SELECT e.kategori, COUNT(*) {self._BASE_FROM} WHERE {where} GROUP BY e.kategori", p)}
 
     def get(self, eid: int):
-        return self.db.execute(
+        return self._execute_with_retry(lambda: self.db.execute(
             f"SELECT e.*, d.birim, d.dosya_no, d.dosya_tur, d.durum AS dosya_durum, d.yargi, d.dosya_id AS case_dosya_id "
-            f"{self._BASE_FROM} WHERE e.id=?", (eid,)).fetchone()
+            f"{self._BASE_FROM} WHERE e.id=?", (eid,)).fetchone())
 
     def by_skey(self, skey: str):
-        return self.db.execute("SELECT * FROM evrak WHERE skey=?", (skey,)).fetchone()
+        return self._execute_with_retry(lambda: self.db.execute("SELECT * FROM evrak WHERE skey=?", (skey,)).fetchone())
 
     def find_sha(self, sha: str):
-        return self.db.execute(
+        return self._execute_with_retry(lambda: self.db.execute(
             "SELECT skey, path FROM evrak WHERE sha256=? AND durum='indirildi' AND path IS NOT NULL LIMIT 1",
-            (sha,)).fetchone()
+            (sha,)).fetchone())
 
     def set_result(self, eid: int, **kw):
         cols = ", ".join(f"{k}=?" for k in kw)
-        with self.db:
-            self.db.execute(f"UPDATE evrak SET {cols} WHERE id=?", list(kw.values()) + [eid])
+        def _do():
+            with self.db:
+                self.db.execute(f"UPDATE evrak SET {cols} WHERE id=?", list(kw.values()) + [eid])
+        self._execute_with_retry(_do)
 
     def set_text(self, eid: int, text: str):
         if not text:
             return
-        with self.db:
-            self.db.execute("DELETE FROM evrak_fts WHERE rowid=?", (eid,))
-            self.db.execute("INSERT INTO evrak_fts(rowid, metin) VALUES(?,?)", (eid, text[:200000]))
+        def _do():
+            with self.db:
+                self.db.execute("DELETE FROM evrak_fts WHERE rowid=?", (eid,))
+                self.db.execute("INSERT INTO evrak_fts(rowid, metin) VALUES(?,?)", (eid, text[:200000]))
+        self._execute_with_retry(_do)
 
     def upsert_tebligat(self, item: dict) -> int:
         now = dt.datetime.now().isoformat()[:19]
@@ -940,7 +960,7 @@ def extract_text(path: Path, raw: bytes | None = None) -> str:
 class Motor:
     """UYAP tarama + indirme. Tüm köprü (tarayıcı) çağrıları tek iş parçacığından yapılmalıdır."""
 
-    def __init__(self, bridge, katalog: Katalog, download_dir: Path, log=print, progress=None):
+    def __init__(self, bridge, katalog: Katalog, download_dir: Path, log=print, progress=None, relogin=None):
         self.bridge = bridge
         self.kat = katalog
         self.download_dir = Path(download_dir)
@@ -952,7 +972,7 @@ class Motor:
         self.pause_flag = threading.Event()
         self.oturum = ""
         self.case_ids: dict[str, str] = {}
-        self.relogin = None  # () -> bool ; GUI/CLI tarafından atanır
+        self.relogin = relogin  # () -> bool ; GUI/CLI tarafından atanır
         self.min_d, self.max_d, self.batch_n, self.batch_pause = 0.6, 1.2, 30, 6.0
 
     def log(self, msg: str):
@@ -1296,6 +1316,44 @@ class Motor:
             self.dbg("Önbellek PDF dönüşümü başarısız: %s", e)
         return p
 
+    def _sync_to_drive(self, local_file: Path | str | None):
+        """İndirilen veya PDF'e dönüştürülen dosyayı anında Google Drive klasörüne yansıtır."""
+        if not local_file:
+            return
+        try:
+            lf = Path(local_file)
+            if not lf.exists() or lf.stat().st_size == 0:
+                return
+            drive_dir = getattr(self, "_drive_dir", None)
+            if drive_dir is None:
+                cands = [
+                    Path("G:/Drive'ım/UYAP_Arsiv"),
+                    Path("G:/My Drive/UYAP_Arsiv"),
+                    Path.home() / "Google Drive" / "UYAP_Arsiv",
+                    Path.home() / "GoogleDrive" / "UYAP_Arsiv",
+                ]
+                self._drive_dir = False
+                for c in cands:
+                    if c.parent.exists():
+                        self._drive_dir = c
+                        break
+                drive_dir = self._drive_dir
+            if not drive_dir:
+                return
+            try:
+                rel = lf.resolve().relative_to(self.download_dir.resolve())
+            except Exception:
+                rel = lf.name
+            target = drive_dir / rel
+            if lf.resolve() == target.resolve():
+                return
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists() or target.stat().st_size != lf.stat().st_size:
+                shutil.copy2(lf, target)
+                self.log(f"[cloud] Google Drive'a aktarıldı: {target.name}")
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ PDF dönüşümü (arka plan)
     def _conv_worker(self):
         import donusturucu as dn
@@ -1309,15 +1367,18 @@ class Motor:
                 done = [f for f in udfs if f.with_suffix(".pdf").exists()]
                 for f in done:
                     self.log(f"[pdf] PDF'e çevrildi: {f.with_suffix('.pdf').name}")
+                    self._sync_to_drive(f.with_suffix(".pdf"))
                 if len(done) < len(udfs):
                     ok, why = dn.udf_hazir_mi()
                     self.log(f"[!] {len(udfs) - len(done)} UDF PDF'e çevrilemedi ({Path(fo).name})"
                              + (f": {why}" if not ok else "."))
                 if done:
-                    with self.kat.db:
-                        for f in done:
-                            self.kat.db.execute("UPDATE evrak SET pdf_path=? WHERE path=?",
-                                                (str(f.with_suffix(".pdf")), str(f)))
+                    def _update_pdfs():
+                        with self.kat.db:
+                            for f in done:
+                                self.kat.db.execute("UPDATE evrak SET pdf_path=? WHERE path=?",
+                                                    (str(f.with_suffix(".pdf")), str(f)))
+                    self.kat._execute_with_retry(_update_pdfs)
                 self.dbg("Klasör dönüşümü %s: %d/%d (%.1fs)", fo, len(done), len(udfs), time.time() - t0)
             except Exception as e:
                 klog.exception("PDF dönüşüm hatası %s: %s", fo, e)
@@ -1352,74 +1413,82 @@ class Motor:
             if self.stop_flag.is_set():
                 break
             done += 1
-            row = self.kat.get(eid)
-            if not row or row["durum"] in ("indirildi", "mukerrer"):
-                stats["atlandi"] += 1
-                continue
-            if last_dkey and row["dkey"] != last_dkey:  # dosya değişti: önceki klasörleri arka planda PDF'e çevir
-                for fo in pending_folders:
-                    self._queue_conversion(fo)
-                pending_folders.clear()
-            last_dkey = row["dkey"]
-            from_cache = bool(row["cache_path"] and os.path.exists(row["cache_path"]))
-            if from_cache:
-                raw, resp, why = Path(row["cache_path"]).read_bytes(), {}, ""
-                ext = Path(row["cache_path"]).suffix
-            else:
-                raw, resp, row2, why = self.fetch(eid, refreshed)
-                row = row2 or row
-                ext = self._ext_of(resp, raw) if raw is not None else ""
-            if raw is None:
-                if why in ("durduruldu", "oturum yenilenemedi"):
-                    if why == "oturum yenilenemedi":
-                        self.log("[x] UYAP'a yeniden giriş yapılamadığı için indirme durduruldu. "
-                                 "Giriş yaptıktan sonra aynı filtreyle tekrar başlatın; kalan evraklar indirilecek.")
-                    break
-                st = "yok" if why == "yok" else "hata"
-                stats[st] += 1
-                if why == "UYAP listesinde artık yok":
-                    self.kat.set_result(eid, hata=why)
+            try:
+                row = self.kat.get(eid)
+                if not row or row["durum"] in ("indirildi", "mukerrer"):
+                    stats["atlandi"] += 1
+                    continue
+                if last_dkey and row["dkey"] != last_dkey:  # dosya değişti: önceki klasörleri arka planda PDF'e çevir
+                    for fo in pending_folders:
+                        self._queue_conversion(fo)
+                    pending_folders.clear()
+                last_dkey = row["dkey"]
+                from_cache = bool(row["cache_path"] and os.path.exists(row["cache_path"]))
+                if from_cache:
+                    raw, resp, why = Path(row["cache_path"]).read_bytes(), {}, ""
+                    ext = Path(row["cache_path"]).suffix
                 else:
-                    self.kat.set_result(eid, durum=st, hata=why[:200])
-                self.log(f"[-] {row['tur']} ({row['birim']} {row['dosya_no']}): alınamadı — {why}")
-            else:
-                sha = content_fingerprint(raw)
-                dup = self.kat.find_sha(sha)
-                if dup and dup["path"] and os.path.exists(dup["path"]):
-                    stats["mukerrer"] += 1
-                    self.kat.set_result(eid, durum="mukerrer", dup_of=dup["skey"], sha256=sha, size=len(raw),
-                                        path=dup["path"], indirildi=dt.datetime.now().isoformat(timespec="seconds"))
-                    self.log(f"[=] Mükerrer (aynı içerik zaten var, kaydedilmedi): {row['tur']} → {Path(dup['path']).name}")
-                else:
-                    path = unique_path(target_path_for(row, self.base, ext))
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    if from_cache:
-                        cpdf = Path(row["cache_path"]).with_suffix(".pdf")
-                        shutil.move(row["cache_path"], path)
-                        if cpdf.exists():
-                            shutil.move(str(cpdf), str(path.with_suffix(".pdf")))
-                        stats["onbellek"] += 1
+                    raw, resp, row2, why = self.fetch(eid, refreshed)
+                    row = row2 or row
+                    ext = self._ext_of(resp, raw) if raw is not None else ""
+                if raw is None:
+                    if why in ("durduruldu", "oturum yenilenemedi"):
+                        if why == "oturum yenilenemedi":
+                            self.log("[x] UYAP'a yeniden giriş yapılamadığı için indirme durduruldu. "
+                                     "Giriş yaptıktan sonra aynı filtreyle tekrar başlatın; kalan evraklar indirilecek.")
+                        break
+                    st = "yok" if why == "yok" else "hata"
+                    stats[st] += 1
+                    if why == "UYAP listesinde artık yok":
+                        self.kat.set_result(eid, hata=why)
                     else:
-                        tmp = path.with_name(path.name + ".part")
-                        tmp.write_bytes(raw)
-                        tmp.replace(path)
-                    pending_folders.add(path.parent)
-                    pdf = path.with_suffix(".pdf") if path.with_suffix(".pdf").exists() else None
-                    if ext.lower() in (".tif", ".tiff") and not pdf:
-                        pdf = tiff_to_pdf(path)
+                        self.kat.set_result(eid, durum=st, hata=why[:200])
+                    self.log(f"[-] {row['tur']} ({row['birim']} {row['dosya_no']}): alınamadı — {why}")
+                else:
+                    sha = content_fingerprint(raw)
+                    dup = self.kat.find_sha(sha)
+                    if dup and dup["path"] and os.path.exists(dup["path"]):
+                        stats["mukerrer"] += 1
+                        self.kat.set_result(eid, durum="mukerrer", dup_of=dup["skey"], sha256=sha, size=len(raw),
+                                            path=dup["path"], indirildi=dt.datetime.now().isoformat(timespec="seconds"))
+                        self.log(f"[=] Mükerrer (aynı içerik zaten var, kaydedilmedi): {row['tur']} → {Path(dup['path']).name}")
+                    else:
+                        path = unique_path(target_path_for(row, self.base, ext))
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        if from_cache:
+                            cpdf = Path(row["cache_path"]).with_suffix(".pdf")
+                            shutil.move(row["cache_path"], path)
+                            if cpdf.exists():
+                                shutil.move(str(cpdf), str(path.with_suffix(".pdf")))
+                            stats["onbellek"] += 1
+                        else:
+                            tmp = path.with_name(path.name + ".part")
+                            tmp.write_bytes(raw)
+                            tmp.replace(path)
+                        pending_folders.add(path.parent)
+                        pdf = path.with_suffix(".pdf") if path.with_suffix(".pdf").exists() else None
+                        if ext.lower() in (".tif", ".tiff") and not pdf:
+                            pdf = tiff_to_pdf(path)
+                            if pdf:
+                                self.log(f"[pdf] TIF → A4 PDF: {pdf.name}")
+                        elif ext.lower() == ".pdf":
+                            pdf = path
+                        self.kat.set_result(eid, durum="indirildi", path=str(path), pdf_path=str(pdf) if pdf else None,
+                                            sha256=sha, size=len(raw), uzanti=ext.lstrip(".").lower(), hata=None,
+                                            cache_path=None, indirildi=dt.datetime.now().isoformat(timespec="seconds"))
+                        self.kat.set_text(eid, extract_text(path, raw))
+                        self._sync_to_drive(path)
                         if pdf:
-                            self.log(f"[pdf] TIF → A4 PDF: {pdf.name}")
-                    elif ext.lower() == ".pdf":
-                        pdf = path
-                    self.kat.set_result(eid, durum="indirildi", path=str(path), pdf_path=str(pdf) if pdf else None,
-                                        sha256=sha, size=len(raw), uzanti=ext.lstrip(".").lower(), hata=None,
-                                        cache_path=None, indirildi=dt.datetime.now().isoformat(timespec="seconds"))
-                    self.kat.set_text(eid, extract_text(path, raw))
-                    stats["indirildi"] += 1
-                    since_pause += 1
-                    bytes_total += len(raw)
-                    self.log(f"[{done}/{total}] {len(raw)//1024} KB{' (önbellekten)' if from_cache else ''}  "
-                             f"{row['birim']} ({row['dosya_no']})  →  {path.name}")
+                            self._sync_to_drive(pdf)
+                        stats["indirildi"] += 1
+                        since_pause += 1
+                        bytes_total += len(raw)
+                        self.log(f"[{done}/{total}] {len(raw)//1024} KB{' (önbellekten)' if from_cache else ''}  "
+                                 f"{row['birim']} ({row['dosya_no']})  →  {path.name}")
+            except Exception as e:
+                klog.exception("Evrak indirme döngüsü hatası id=%s: %s", eid, e)
+                self.log(f"[!] Evrak #{eid} işlenirken hata oluştu ({e}); sonraki evraka geçiliyor...")
+                stats["hata"] += 1
             el = time.time() - t_start
             rate = done / el if el > 0 else 0
             kalan = (total - done) / rate if rate > 0 else 0

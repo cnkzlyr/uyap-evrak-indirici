@@ -37,6 +37,22 @@ import gui_ekler as ge  # noqa: E402
 ROW_LIMIT = 1000
 
 
+def prevent_sleep(enable: bool = True):
+    """Windows'un indirme veya tarama sürerken uyku moduna geçmesini (idle sleep) engeller."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_AWAYMODE_REQUIRED = 0x00000040
+            if enable:
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)
+            else:
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Küçük takvim seçici
 # ---------------------------------------------------------------------------
@@ -100,25 +116,26 @@ class DatePicker(tk.Toplevel):
 # Üç durumlu liste: 1. tık getir (yeşil), 2. tık hariç tut (kırmızı), 3. tık kaldır
 # ---------------------------------------------------------------------------
 class TriList(ttk.Frame):
-    RENK = {1: ("#dff5e4", "#0b6b2b", "✔ "), -1: ("#fde0e0", "#a31515", "✖ "), 0: ("#ffffff", "#000000", "    ")}
+    RENK = {1: ("#dcfce7", "#15803d", "✔ "), -1: ("#fee2e2", "#b91c1c", "✖ "), 0: ("#ffffff", "#000000", "    ")}
 
-    def __init__(self, master, height=8, search=False, labeler=None, on_change=None):
+    def __init__(self, master, height=8, search=False, labeler=None, on_change=None, card=None):
         super().__init__(master)
         self.labeler = labeler or (lambda k: k or "(boş)")
         self.on_change = on_change
+        self.card = card
         self.state: dict[str, int] = {}
         self.items: list[tuple[str, int]] = []
         self.visible: list[str] = []
         self.q = tk.StringVar()
         if search:
             sf = ttk.Frame(self)
-            sf.pack(fill="x")
+            sf.pack(fill="x", pady=(0, 2))
             ttk.Label(sf, text="🔍").pack(side="left")
             ttk.Entry(sf, textvariable=self.q).pack(side="left", fill="x", expand=True)
             self.q.trace_add("write", lambda *a: self.redraw())
         lf = ttk.Frame(self)
         lf.pack(fill="both", expand=True)
-        self.lb = tk.Listbox(lf, height=height, activestyle="none", exportselection=False, width=44,
+        self.lb = tk.Listbox(lf, height=height, activestyle="none", exportselection=False,
                              selectmode="single", highlightthickness=1)
         sb = ttk.Scrollbar(lf, orient="vertical", command=self.lb.yview)
         self.lb.configure(yscrollcommand=sb.set)
@@ -127,14 +144,17 @@ class TriList(ttk.Frame):
         self.lb.bind("<Button-1>", self._click)
         self.lb.bind("<Double-Button-1>", lambda e: "break")
         self.lb.bind("<B1-Motion>", lambda e: "break")
+        self._tip = None
+        self.lb.bind("<Motion>", self._on_hover)
+        self.lb.bind("<Leave>", self._close_tip)
         bf = ttk.Frame(self)
-        bf.pack(fill="x")
+        bf.pack(fill="x", pady=(2, 0))
         self.sort = "sayi"
-        self.btn_sort = ttk.Button(bf, text="Sırala: A→Z", width=12, command=self.toggle_sort)
+        self.btn_sort = ttk.Button(bf, text="Sırala: A→Z", width=11, command=self.toggle_sort)
         self.btn_sort.pack(side="right", padx=(2, 0))
-        self.lbl = ttk.Label(bf, text="", foreground="#555")
+        ttk.Button(bf, text="Temizle", width=7, command=self.clear).pack(side="right")
+        self.lbl = ttk.Label(bf, text="Seçim yok", foreground="#64748b", font=("Segoe UI", 8))
         self.lbl.pack(side="left")
-        ttk.Button(bf, text="Temizle", width=8, command=self.clear).pack(side="right")
 
     # --- durum
     def has_selection(self) -> bool:
@@ -153,6 +173,46 @@ class TriList(ttk.Frame):
     def clear(self, notify: bool = True):
         self.set_state({}, notify=notify)
 
+    def _on_hover(self, e):
+        idx = self.lb.nearest(e.y)
+        if 0 <= idx < len(self.visible):
+            full_txt = str(self.labeler(self.visible[idx]))
+            if len(full_txt) > 25:
+                if not self._tip:
+                    self._tip = tk.Toplevel(self)
+                    self._tip.wm_overrideredirect(True)
+                    try:
+                        self._tip.attributes("-topmost", True)
+                    except Exception:
+                        pass
+                    self._tip_lbl = tk.Label(self._tip, background="#0f172a", foreground="#f8fafc",
+                                             relief="flat", borderwidth=1, font=("Segoe UI", 9),
+                                             padx=10, pady=5, wraplength=450, justify="left")
+                    self._tip_lbl.pack()
+                self._tip_lbl.config(text=full_txt)
+                x = self.lb.winfo_rootx() + e.x + 15
+                y = self.lb.winfo_rooty() + e.y + 12
+                sw = self.winfo_screenwidth()
+                sh = self.winfo_screenheight()
+                self._tip.update_idletasks()
+                tw = self._tip.winfo_reqwidth()
+                th = self._tip.winfo_reqheight()
+                if x + tw > sw - 12:
+                    x = max(10, sw - tw - 12)
+                if y + th > sh - 12:
+                    y = max(10, y - th - 20)
+                self._tip.wm_geometry(f"+{x}+{y}")
+                return
+        self._close_tip()
+
+    def _close_tip(self, _e=None):
+        if getattr(self, "_tip", None):
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
     def set_items(self, items: list):
         self.items = list(items)
         have = {k for k, _ in self.items}
@@ -166,7 +226,6 @@ class TriList(ttk.Frame):
         q = ek.fold(self.q.get())
         top = self.lb.yview()[0]
         self.lb.delete(0, "end")
-        # Sıra sabit kalır (sayıya göre); tıklanan öğe yer değiştirmez, art arda tıklama aynı öğeye gider
         self.visible = []
         items = self.items
         if self.sort == "alfa":
@@ -184,7 +243,17 @@ class TriList(ttk.Frame):
         d = sum(1 for v in self.state.values() if v == 1)
         h = sum(1 for v in self.state.values() if v == -1)
         parts = ([f"{d} getir"] if d else []) + ([f"{h} hariç"] if h else [])
-        self.lbl.config(text=", ".join(parts) if parts else "Seçim yok")
+        txt = ", ".join(parts) if parts else "Seçim yok"
+        self.lbl.config(text=txt)
+        if getattr(self, "card", None):
+            if d > 0 and h > 0:
+                self.card.set_badge(f"✔ {d} · ✖ {h}", style="Badge.Warn.TLabel")
+            elif d > 0:
+                self.card.set_badge(f"✔ {d} getir", style="Badge.Ok.TLabel")
+            elif h > 0:
+                self.card.set_badge(f"✖ {h} hariç", style="Badge.Err.TLabel")
+            else:
+                self.card.set_badge("Tümü", style="Badge.Count.TLabel")
 
     def toggle_sort(self):
         self.set_sort("alfa" if self.sort == "sayi" else "sayi")
@@ -215,20 +284,21 @@ class TriList(ttk.Frame):
 # Ana pencere
 # ---------------------------------------------------------------------------
 class KatalogApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, watcher_mode: bool = False):
         import uyap_indirici as ui
         self.ui = ui
         self.root = root
+        self._start_with_watcher = watcher_mode
         root.title(f"{ge.UYGULAMA_ADI} {ge.SURUM} — Av. Can KIZILYAR")
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.geometry(f"{int(sw * 0.9)}x{int(sh * 0.86)}+{int(sw * 0.04)}+{int(sh * 0.03)}")
+        root.geometry(f"{int(sw * 0.92)}x{int(sh * 0.88)}+{int(sw * 0.03)}+{int(sh * 0.02)}")
         try:  # pencere / görev çubuğu simgesi
             base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
             self._icon = tk.PhotoImage(file=str(base / "assets" / "uyap_evrak_256.png"))
             root.iconphoto(True, self._icon)
         except Exception:
             pass
-        root.minsize(min(760, sw), min(520, sh))
+        root.minsize(min(800, sw), min(540, sh))
         self.kat = ek.Katalog()
         self.bridge = ui.UyapBrowserBridge(port=ui.CDP_PORT)
         self.download_dir = Path(ui.DEFAULT_DOWNLOAD_DIR)
@@ -239,73 +309,130 @@ class KatalogApp:
         self.ui_q: queue.Queue = queue.Queue()
         self.work_q: queue.Queue = queue.Queue()
         self.busy = False
-        self.login_method = None   # ("eimza", pin) | ("mobil", tc, gsm, op)
+        self._current_task_name = "Hazır"
+        self._anim_frame = 0
+        self.login_method = ("eimza", ui.DEFAULT_E_IMZA_PIN) if getattr(ui, "DEFAULT_E_IMZA_PIN", None) else None
         self._query_token = 0
         self._debounce = None
+        self.cards: dict[str, ge.CollapsibleCard] = {}
         self._build()
+        self._check_drive_status()
         if not self._load_state():
             self.tri["durum"].set_state({"yeni": 1}, notify=False)  # ilk açılış: indirilmemişler
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._startup_sync, daemon=True).start()
         self.root.after(100, self._drain)
+        self.root.after(150, self._animate)
         self.refresh_facets()
         self.apply_filters()
+        if hasattr(self, "tabs_mgr"):
+            self.root.after(400, self.tabs_mgr.refresh_finans_combo)
+            self.root.after(500, self.tabs_mgr.refresh_icra_combo)
+        if self._start_with_watcher:
+            self.root.after(1500, self.toggle_watcher_mode)
 
     # ------------------------------------------------------------------ arayüz
     def _build(self):
         ge.stil_uygula(self.root)
         self._build_menu()
+
+        # 1. Başlık Çubuğu (Header Bar)
         head = ttk.Frame(self.root, style="Baslik.TFrame", padding=(12, 6))
         head.pack(fill="x")
-        ttk.Label(head, text=f"⚖  {ge.UYGULAMA_ADI}", style="Baslik.TLabel").pack(side="left")
-        ttk.Label(head, text=ge.IMZA, style="Imza.TLabel").pack(side="right")
+        ttk.Label(head, text=f"⚖  {ge.UYGULAMA_ADI} v{ge.SURUM}", style="Baslik.TLabel").pack(side="left")
 
-        top = ttk.Frame(self.root, padding=(8, 6))
+        # Rozetler (Sağ üst)
+        self.lbl_copy = ttk.Label(head, text=ge.IMZA, style="Imza.TLabel")
+        self.lbl_copy.pack(side="right", padx=(8, 0))
+        self.lbl_drive_badge = ttk.Label(head, text="☁ Drive: Kontrol ediliyor...", style="Badge.Drive.TLabel")
+        self.lbl_drive_badge.pack(side="right", padx=(4, 4))
+        self.lbl_session_badge = ttk.Label(head, text="● Oturum: Bekleniyor", style="Badge.Warn.TLabel")
+        self.lbl_session_badge.pack(side="right", padx=(4, 4))
+        self.lbl_activity = ttk.Label(head, text="● Hazır", style="Badge.Ok.TLabel")
+        self.lbl_activity.pack(side="right", padx=(4, 4))
+
+        # 2. Araç Çubuğu (Toolbar)
+        top = ttk.Frame(self.root, padding=(8, 5))
         top.pack(fill="x")
-        b = ttk.Button(top, text="☰", width=3, command=self.toggle_filters)
-        b.pack(side="left", padx=(0, 6))
-        ge.Ipucu(b, "Filtre panelini gizle / göster (Ctrl+B). Dar ekranlarda (ör. Android/Termux) kendiliğinden gizlenir.")
-        self.lbl_session = ttk.Label(top, text="Oturum: bağlı değil", foreground="#a33")
-        self.lbl_session.pack(side="left")
+
+        b_flt = ttk.Button(top, text="☰ Filtreler", width=11, command=self.toggle_filters)
+        b_flt.pack(side="left", padx=(0, 6))
+        ge.Ipucu(b_flt, "Filtre panelini gizle / göster (Ctrl+B).")
+
         self.var_headless = tk.BooleanVar(value=True)
         cb = ttk.Checkbutton(top, text="Tarayıcıyı gizli çalıştır", variable=self.var_headless)
-        cb.pack(side="left", padx=12)
-        ge.Ipucu(cb, "İşaretliyse UYAP için açılan Chrome/Edge penceresi görünmez (arka planda çalışır). "
-                     "Giriş e-İmza veya Mobil İmza ile otomatik yapılır.")
-        b = ttk.Button(top, text="Bağlan / Giriş", command=self.on_connect, style="Vurgu.TButton")
-        b.pack(side="left", padx=2)
-        ge.Ipucu(b, "Tarayıcıyı hazırlar, UYAP oturumunu kontrol eder; kapalıysa giriş yöntemini sorar.")
-        b = ttk.Button(top, text="UYAP'ı Tara", command=self.on_scan)
-        b.pack(side="left", padx=2)
-        ge.Ipucu(b, "Evrak LİSTESİNİ günceller (indirme yapmaz). Günlük kullanımda 'yalnızca açık dosyalar' yeterli.")
-        self.btn_pause = ttk.Button(top, text="Duraklat", command=self.on_pause)
+        cb.pack(side="left", padx=(0, 8))
+        ge.Ipucu(cb, "İşaretliyse UYAP Chrome arka planda görünmez çalışır; giriş e-İmza ile otomatik yapılır.")
+
+        b_conn = ttk.Button(top, text="⚡ Bağlan / Giriş", command=self.on_connect, style="Vurgu.TButton")
+        b_conn.pack(side="left", padx=2)
+        ge.Ipucu(b_conn, "Tarayıcıyı hazırlar ve UYAP oturumunu açar/doğrular.")
+
+        b_scan = ttk.Button(top, text="🔍 UYAP'ı Tara", command=self.on_scan)
+        b_scan.pack(side="left", padx=2)
+        ge.Ipucu(b_scan, "Evrak LİSTESİNİ günceller (indirme yapmaz).")
+
+        # Nöbetçi Bot Butonu (GUI içinden tek tıkla)
+        self.var_watcher_active = tk.BooleanVar(value=False)
+        self.btn_watcher = ttk.Button(top, text="👁 Nöbetçi Modu", command=self.toggle_watcher_mode, style="Watcher.TButton")
+        self.btn_watcher.pack(side="left", padx=(6, 2))
+        ge.Ipucu(self.btn_watcher, "Nöbetçi Bot: Açık dosyaları arka planda izler, yeni evrakları ve eksikleri Google Drive'a otomatik eşitler.")
+
+        self.btn_pause = ttk.Button(top, text="⏸️ Duraklat", command=self.on_pause)
         self.btn_pause.pack(side="left", padx=2)
-        ttk.Button(top, text="Durdur", command=self.on_stop).pack(side="left", padx=2)
-        self.lbl_stats = ttk.Label(top, text="")
-        self.lbl_stats.pack(side="right")
 
-        prog = ttk.Frame(self.root, padding=(8, 0))
-        prog.pack(fill="x")
-        self.pbar = ttk.Progressbar(prog, mode="determinate")
-        self.pbar.pack(side="left", fill="x", expand=True)
-        self.lbl_prog = ttk.Label(prog, text="", width=95)
-        self.lbl_prog.pack(side="left", padx=6)
+        self.btn_stop = ttk.Button(top, text="⏹️ Durdur", command=self.on_stop)
+        self.btn_stop.pack(side="left", padx=2)
 
+        # 3. İlerleme ve İstatistik Şeridi (Progress & Dashboard Stat Strip)
+        stat_bar = ttk.Frame(self.root, padding=(8, 3))
+        stat_bar.pack(fill="x")
+
+        # Sol: İlerleme Çubuğu ve Durum Metni
+        prog_left = ttk.Frame(stat_bar)
+        prog_left.pack(side="left", fill="x", expand=True)
+
+        self.pbar = ttk.Progressbar(prog_left, mode="determinate")
+        self.pbar.pack(fill="x", expand=True)
+
+        self.lbl_prog = ttk.Label(prog_left, text="Hazır", font=("Segoe UI", 8), foreground="#475569")
+        self.lbl_prog.pack(anchor="w", pady=(1, 0))
+
+        # Sağ: İstatistik Rozetleri
+        self.stat_chips = ttk.Frame(stat_bar)
+        self.stat_chips.pack(side="right", padx=(8, 0))
+
+        self.lbl_stat_dosya = ttk.Label(self.stat_chips, text="📁 - dosya", style="Badge.Count.TLabel")
+        self.lbl_stat_dosya.pack(side="left", padx=2)
+        self.lbl_stat_evrak = ttk.Label(self.stat_chips, text="📄 - evrak", style="Badge.Count.TLabel")
+        self.lbl_stat_evrak.pack(side="left", padx=2)
+        self.lbl_stat_indirildi = ttk.Label(self.stat_chips, text="✅ - indirildi", style="Badge.Ok.TLabel")
+        self.lbl_stat_indirildi.pack(side="left", padx=2)
+        self.lbl_stat_mukerrer = ttk.Label(self.stat_chips, text="🔁 - mükerrer", style="Badge.Count.TLabel")
+        self.lbl_stat_mukerrer.pack(side="left", padx=2)
+
+        # 4. Ana Bölünmüş Gövde (Split Body)
         body = ttk.PanedWindow(self.root, orient="horizontal")
-        body.pack(fill="both", expand=True, padx=8, pady=6)
+        body.pack(fill="both", expand=True, padx=8, pady=(4, 6))
         self.body = body
 
-        # ---- filtre paneli (kaydırılabilir)
+        # ---- filtre paneli (kaydırılabilir & yeniden boyutlanabilir)
         outer = ttk.Frame(body)
-        canvas = tk.Canvas(outer, width=360, highlightthickness=0)
+        canvas = tk.Canvas(outer, width=370, highlightthickness=0)
         sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        fp = ttk.Frame(canvas, padding=(2, 2, 10, 2))
+        fp = ttk.Frame(canvas, padding=(4, 4, 8, 4))
         fp.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=fp, anchor="nw")
+        canvas_win = canvas.create_window((0, 0), window=fp, anchor="nw")
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+
+        # Bölücü sürüklendiğinde genişliği otomatik yay
+        def _on_canvas_configure(e):
+            canvas.itemconfig(canvas_win, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
         canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
                         if str(e.widget).startswith(str(fp)) or e.widget is canvas else None)
         body.add(outer, weight=0)
@@ -313,74 +440,131 @@ class KatalogApp:
         self._filters_visible = True
         self._build_filters(fp)
 
-        # ---- sonuçlar
+        # ---- sonuçlar paneli
         right = ttk.Frame(body)
         body.add(right, weight=1)
-        bar = ttk.Frame(right)
+
+        self.notebook = ttk.Notebook(right)
+        self.notebook.pack(fill="both", expand=True)
+
+        # Tab 1: Evrak Kataloğu
+        tab_evrak = ttk.Frame(self.notebook, padding=2)
+        self.notebook.add(tab_evrak, text="📁 Evrak Kataloğu")
+
+        bar = ttk.Frame(tab_evrak, padding=(0, 2, 0, 4))
         bar.pack(fill="x")
-        self.lbl_count = ttk.Label(bar, text="", font=("Segoe UI", 10, "bold"))
-        self.lbl_count.pack(side="left")
-        ttk.Button(bar, text="CSV'ye aktar", command=self.on_export).pack(side="right", padx=2)
-        ttk.Button(bar, text="Klasörü aç", command=self.on_open_folder).pack(side="right", padx=2)
-        ttk.Button(bar, text="Seçilileri indir", command=self.on_download_selected).pack(side="right", padx=2)
-        self.btn_dl_all = ttk.Button(bar, text="Filtredekilerin tümünü indir", command=self.on_download_filtered)
+        self.lbl_count = ttk.Label(bar, text="", font=("Segoe UI", 10, "bold"), foreground="#0f172a")
+        self.lbl_count.pack(side="left", padx=(2, 0))
+
+        btn_box = ttk.Frame(bar)
+        btn_box.pack(side="right")
+
+        b_exp = ttk.Button(btn_box, text="📊 CSV", command=self.on_export)
+        b_exp.pack(side="right", padx=2)
+        ge.Ipucu(b_exp, "Filtrelenen evrak listesini CSV dosyasına aktarır.")
+
+        b_dir = ttk.Button(btn_box, text="📂 Klasör", command=self.on_open_folder)
+        b_dir.pack(side="right", padx=2)
+        ge.Ipucu(b_dir, "İndirme ve arşiv klasörünü açar.")
+
+        b_sel = ttk.Button(btn_box, text="✓ Seçilileri İndir", command=self.on_download_selected)
+        b_sel.pack(side="right", padx=2)
+        ge.Ipucu(b_sel, "Tabloda seçili olan evrakları indirir (Ctrl+D).")
+
+        self.btn_dl_all = ttk.Button(btn_box, text="📥 Filtredekileri İndir", command=self.on_download_filtered, style="Vurgu.TButton")
         self.btn_dl_all.pack(side="right", padx=2)
+        ge.Ipucu(self.btn_dl_all, "Mevcut filtrelere uyan tüm indirilmemiş evrakları kuyruğa alıp indirir.")
 
         cols = ("tarih", "birim", "dosya", "tip", "evrak", "aciklama", "kategori", "durum")
-        heads = ("Tarih", "Birim", "Dosya No", "Asıl/Ek", "Evrak / Ek Adı", "Açıklama", "Kategori", "Durum")
-        widths = (82, 210, 80, 60, 300, 230, 130, 120)
-        vpane = ttk.PanedWindow(right, orient="vertical")
+        heads = ("Tarih", "Birim / Mahkeme", "Dosya No", "Asıl/Ek", "Evrak / Ek Adı", "Açıklama", "Kategori", "Durum")
+        widths = (85, 220, 90, 65, 280, 220, 130, 125)
+        minwidths = (75, 140, 70, 50, 160, 140, 95, 95)
+        vpane = ttk.PanedWindow(tab_evrak, orient="vertical")
         vpane.pack(fill="both", expand=True, pady=(4, 0))
         tf = ttk.Frame(vpane)
         vpane.add(tf, weight=4)
+
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="extended")
-        for c, h, w in zip(cols, heads, widths):
+        for c, h, w, mw in zip(cols, heads, widths, minwidths):
             self.tree.heading(c, text=h)
-            self.tree.column(c, width=w, stretch=c in ("evrak", "aciklama"))
+            self.tree.column(c, width=w, minwidth=mw, stretch=c in ("evrak", "aciklama", "birim"))
+
         vs = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vs.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        vs.pack(side="right", fill="y")
-        self.tree.tag_configure("indirildi", foreground="#1a7f37")
-        self.tree.tag_configure("mukerrer", foreground="#888888")
-        self.tree.tag_configure("ek", background="#f6f8fa")
-        self.tree.tag_configure("onbellek", foreground="#1f4e8c")
+        hs = ttk.Scrollbar(tf, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        tf.grid_rowconfigure(0, weight=1)
+        tf.grid_columnconfigure(0, weight=1)
+
+        self.tree.tag_configure("cift", background="#ffffff")
+        self.tree.tag_configure("tek", background="#f8fafc")
+        self.tree.tag_configure("indirildi", foreground="#15803d")
+        self.tree.tag_configure("mukerrer", foreground="#64748b")
+        self.tree.tag_configure("ek", font=("Segoe UI", 9))
+        self.tree.tag_configure("onbellek", foreground="#0284c7")
+        self.tree.tag_configure("hata", foreground="#dc2626")
+
         self.tree.bind("<Double-1>", self.on_open_doc)
         self.tree.bind("<Return>", self.on_open_doc)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._show_detail())
 
         # Ayrıntı paneli (görüntüleyici)
-        det = ttk.LabelFrame(vpane, text="Seçili evrak", padding=6, style="Ayrinti.TLabelframe")
+        det = ttk.LabelFrame(vpane, text="📄 Seçili Evrak Ayrıntıları", padding=6, style="Ayrinti.TLabelframe")
         vpane.add(det, weight=1)
         self.lbl_detail = ttk.Label(det, text="Bir evrak seçin. Çift tık: aç (indirilmemişse önbelleğe alıp açar).",
-                                    justify="left", wraplength=900)
+                                    justify="left", wraplength=750)
         self.lbl_detail.pack(anchor="w", fill="x")
+        det.bind("<Configure>", lambda e: self.lbl_detail.config(wraplength=max(250, det.winfo_width() - 24)))
         dbf = ttk.Frame(det)
         dbf.pack(fill="x", pady=(4, 2))
         for txt, cmd, tip in (
-                ("Aç", self.on_open_doc, "İndirilmişse PDF'ini (yoksa kendisini) açar; indirilmemişse önbelleğe alıp açar."),
-                ("Orijinal dosyayı aç", lambda: self.on_open_doc(orijinal=True), "PDF yerine UDF/TIF/EYP aslını açar."),
-                ("Klasörde göster", self.on_open_folder, "Dosyanın bulunduğu klasörü açar ve dosyayı seçer."),
-                ("Seçilileri indir", self.on_download_selected, "Seçili evrakları indirme klasörüne kaydeder."),
-                ("Asıl evrak + tüm eklerini seç", self.select_family, "Seçili evrakın asıl evrakını ve tüm eklerini listede seçer.")):
+                ("👁️ Aç / PDF", self.on_open_doc, "İndirilmişse PDF'ini (yoksa kendisini) açar; indirilmemişse önbelleğe alıp açar."),
+                ("📄 Orijinal Aç", lambda: self.on_open_doc(orijinal=True), "PDF yerine UDF/TIF/EYP aslını açar."),
+                ("📂 Klasörde Göster", self.on_open_folder, "Dosyanın bulunduğu klasörü açar ve dosyayı seçer."),
+                ("📥 Seçilileri İndir", self.on_download_selected, "Seçili evrakları indirme klasörüne kaydeder."),
+                ("📎 Asıl + Tüm Ekler", self.select_family, "Seçili evrakın asıl evrakını ve tüm eklerini listede seçer.")):
             b = ttk.Button(dbf, text=txt, command=cmd)
             b.pack(side="left", padx=2)
             ge.Ipucu(b, tip)
-        self.lb_ekler = tk.Listbox(det, height=4, activestyle="none")
-        self.lb_ekler.pack(fill="both", expand=True)
+
+        ek_frame = ttk.Frame(det)
+        ek_frame.pack(fill="both", expand=True, pady=(2, 0))
+        self.lb_ekler = tk.Listbox(ek_frame, height=3, activestyle="none")
+        ek_sb = ttk.Scrollbar(ek_frame, orient="vertical", command=self.lb_ekler.yview)
+        self.lb_ekler.configure(yscrollcommand=ek_sb.set)
+        self.lb_ekler.pack(side="left", fill="both", expand=True)
+        ek_sb.pack(side="right", fill="y")
         self.lb_ekler.bind("<Double-Button-1>", self._open_family_item)
         self._family_ids: list = []
 
-        logf = ttk.LabelFrame(vpane, text="İşlem günlüğü (tamamı loglar/katalog.log dosyasına da yazılır)", padding=2)
+        # Günlük paneli
+        logf = ttk.LabelFrame(vpane, text="📋 İşlem Günlüğü (katalog.log)", padding=2)
         vpane.add(logf, weight=1)
-        self.txt_log = tk.Text(logf, height=7, wrap="none", font=("Consolas", 9))
+        self.txt_log = tk.Text(logf, height=6, wrap="none", font=("Consolas", 9))
         lsb = ttk.Scrollbar(logf, orient="vertical", command=self.txt_log.yview)
-        self.txt_log.configure(yscrollcommand=lsb.set)
-        lsb.pack(side="right", fill="y")
-        self.txt_log.pack(fill="both", expand=True)
-        self.txt_log.tag_configure("hata", foreground="#a31515")
-        self.txt_log.tag_configure("ok", foreground="#1a7f37")
-        self.txt_log.tag_configure("pdf", foreground="#6b3fa0")
+        lhs = ttk.Scrollbar(logf, orient="horizontal", command=self.txt_log.xview)
+        self.txt_log.configure(yscrollcommand=lsb.set, xscrollcommand=lhs.set)
+        self.txt_log.grid(row=0, column=0, sticky="nsew")
+        lsb.grid(row=0, column=1, sticky="ns")
+        lhs.grid(row=1, column=0, sticky="ew")
+        logf.grid_rowconfigure(0, weight=1)
+        logf.grid_columnconfigure(0, weight=1)
+
+        self.txt_log.tag_configure("hata", foreground="#dc2626")
+        self.txt_log.tag_configure("ok", foreground="#15803d")
+        self.txt_log.tag_configure("pdf", foreground="#7c3aed")
+        self.txt_log.tag_configure("drive", foreground="#0284c7")
+        self.txt_log.tag_configure("warn", foreground="#d97706")
+
+        # Gelişmiş GUI Sekmeleri (Finans, İcra, Süreler, İşlemlerim, Gemini AI, Notion/TickTick)
+        try:
+            import katalog_tabs
+            self.tabs_mgr = katalog_tabs.KatalogTabsManager(self, self.notebook)
+        except Exception as e:
+            self._ui_log(f"Sekme yöneticisi başlatma uyarısı: {e}", tag="warn")
 
         # Kısayollar
         self.root.bind("<Control-b>", lambda e: self.toggle_filters())
@@ -393,114 +577,148 @@ class KatalogApp:
     def _build_filters(self, fp: ttk.Frame):
         self.v = {}
         self.tri: dict[str, TriList] = {}
-        r = 0
+        self.cards: dict[str, ge.CollapsibleCard] = {}
 
-        def sec(title, hint=None):
-            nonlocal r
-            ttk.Label(fp, text=title, font=("Segoe UI", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
-            r += 1
-            if hint:
-                ttk.Label(fp, text=hint, foreground="#777", wraplength=340, justify="left").grid(row=r, column=0, columnspan=3, sticky="w")
-                r += 1
+        # 1. Metin Arama Kartı
+        c_metin = ge.CollapsibleCard(fp, title="Metin Arama", icon="🔍", collapsed=False)
+        c_metin.pack(fill="x", pady=2)
+        self.cards["metin"] = c_metin
+        mf = c_metin.body
+        mf.columnconfigure(1, weight=1)
 
-        def entry(label, key, width=30, combo=False):
-            nonlocal r
-            ttk.Label(fp, text=label).grid(row=r, column=0, sticky="w")
+        def mentry(r, label, key, combo=False):
+            ttk.Label(mf, text=label).grid(row=r, column=0, sticky="w", pady=1)
             var = tk.StringVar()
-            w = ttk.Combobox(fp, textvariable=var, width=width - 3) if combo else ttk.Entry(fp, textvariable=var, width=width)
-            w.grid(row=r, column=1, columnspan=2, sticky="we", pady=1)
+            w = ttk.Combobox(mf, textvariable=var) if combo else ttk.Entry(mf, textvariable=var)
+            w.grid(row=r, column=1, sticky="we", padx=(4, 0), pady=1)
             var.trace_add("write", lambda *a: self.schedule_filter())
             if combo:
                 w.bind("<<ComboboxSelected>>", lambda e: self.schedule_filter(0))
             self.v[key] = var
-            r += 1
             return w
 
-        def tri(key, title, height, search=False, labeler=None, hint=None):
-            nonlocal r
-            sec(title, hint)
-            t = TriList(fp, height=height, search=search, labeler=labeler, on_change=lambda: self.schedule_filter(250))
-            t.grid(row=r, column=0, columnspan=3, sticky="we")
-            r += 1
-            self.tri[key] = t
-            return t
-
-        ttk.Label(fp, text="Listelerde: 1. tık = getir (yeşil ✔), 2. tık = hariç tut (kırmızı ✖), 3. tık = kaldır.\n"
-                           "Metinlerde: başına - koyulan kelime hariç tutulur (ör. ahmet -mehmet).",
-                  foreground="#1f4e8c", justify="left", wraplength=340).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-
-        sec("Metin arama (Türkçe harf duyarsız)")
-        self.ent_taraf = entry("Taraf / kişi", "taraf")
-        ge.Ipucu(self.ent_taraf, "Taraf adı, açıklamadaki kişi adları ve dosyanın taraf/vekil listesinde arar.\n"
+        self.ent_taraf = mentry(0, "Taraf / kişi", "taraf")
+        ge.Ipucu(self.ent_taraf, "Taraf adı, açıklamada geçen kişiler ve dosyadaki taraflarda arar.\n"
                                  "Örnek: sungur -ahmet  →  Sungur geçen, Ahmet geçmeyen.")
-        self.cb_muv = entry("Müvekkil", "muvekkil", combo=True)
+        self.cb_muv = mentry(1, "Müvekkil", "muvekkil", combo=True)
         self.v["sadece_muvekkilli"] = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fp, text="Yalnızca müvekkilim olan dosyalar", variable=self.v["sadece_muvekkilli"],
-                        command=self.schedule_filter).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-        entry("Açıklama / ad", "aciklama")
-        entry("Evrak türü içerir", "tur")
-        entry("İçerik (indirilenler)", "icerik")
-        entry("Dosya no", "dosya_no")
+        ttk.Checkbutton(mf, text="Yalnızca müvekkilim olan dosyalar", variable=self.v["sadece_muvekkilli"],
+                        command=self.schedule_filter).grid(row=2, column=0, columnspan=2, sticky="w", pady=1)
+        mentry(3, "Açıklama / ad", "aciklama")
+        mentry(4, "Evrak türü içerir", "tur")
+        mentry(5, "İçerik (arama)", "icerik")
+        mentry(6, "Dosya no", "dosya_no")
 
-        sec("Tarih")
-        for label, key in (("Başlangıç", "baslangic"), ("Bitiş", "bitis")):
-            ttk.Label(fp, text=label).grid(row=r, column=0, sticky="w")
+        # 2. Tarih Kartı
+        c_tarih = ge.CollapsibleCard(fp, title="Tarih Aralığı", icon="📅", collapsed=False)
+        c_tarih.pack(fill="x", pady=2)
+        self.cards["tarih"] = c_tarih
+        tf = c_tarih.body
+        tf.columnconfigure(1, weight=1)
+
+        for r_idx, (lbl_txt, key) in enumerate((("Başlangıç", "baslangic"), ("Bitiş", "bitis"))):
+            ttk.Label(tf, text=lbl_txt).grid(row=r_idx, column=0, sticky="w", pady=1)
             var = tk.StringVar()
-            ttk.Entry(fp, textvariable=var, width=14).grid(row=r, column=1, sticky="w")
-            ttk.Button(fp, text="📅", width=3, command=lambda v=var: DatePicker(self.root, v, self.schedule_filter)).grid(row=r, column=2, sticky="w")
+            df = ttk.Frame(tf)
+            df.grid(row=r_idx, column=1, sticky="we", padx=(4, 0), pady=1)
+            df.columnconfigure(0, weight=1)
+            ttk.Entry(df, textvariable=var).grid(row=0, column=0, sticky="we")
+            ttk.Button(df, text="📅", width=3,
+                       command=lambda v=var: DatePicker(self.root, v, self.schedule_filter)).grid(row=0, column=1, padx=(2, 0))
             var.trace_add("write", lambda *a: self.schedule_filter())
             self.v[key] = var
-            r += 1
-        ttk.Label(fp, text="Son … gün").grid(row=r, column=0, sticky="w")
+
+        ttk.Label(tf, text="Son … gün").grid(row=2, column=0, sticky="w", pady=1)
         self.v["son_gun"] = tk.StringVar()
-        ttk.Spinbox(fp, from_=0, to=10000, textvariable=self.v["son_gun"], width=8).grid(row=r, column=1, sticky="w")
+        ttk.Spinbox(tf, from_=0, to=10000, textvariable=self.v["son_gun"], width=8).grid(row=2, column=1, sticky="w", padx=(4, 0), pady=1)
         self.v["son_gun"].trace_add("write", lambda *a: self.schedule_filter())
-        r += 1
-        qb = ttk.Frame(fp)
-        qb.grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+
+        qb = ttk.Frame(tf)
+        qb.grid(row=3, column=0, columnspan=2, sticky="we", pady=(3, 1))
         for n in (7, 30, 90, 365):
-            ttk.Button(qb, text=f"{n} gün", width=7, command=lambda n=n: self.v["son_gun"].set(str(n))).pack(side="left", padx=1)
-        ttk.Button(qb, text="Temizle", width=8, command=lambda: [self.v[k].set("") for k in ("son_gun", "baslangic", "bitis")]).pack(side="left", padx=1)
+            ttk.Button(qb, text=f"{n}g", width=4,
+                       command=lambda n=n: self.v["son_gun"].set(str(n))).pack(side="left", padx=1)
+        ttk.Button(qb, text="Temizle", width=7,
+                   command=lambda: [self.v[k].set("") for k in ("son_gun", "baslangic", "bitis")]).pack(side="left", padx=1)
 
-        tri("durum", "İndirme durumu", 5, labeler=lambda k: ek.DURUMLAR.get(k, k or "?"))
-        tri("kategori", "Evrak kategorisi", 10, labeler=lambda k: ek.KATEGORI_ADI.get(k, k or "?"))
+        # 3. Üç Durumlu Filtre Listeleri (Kartlar)
+        def make_tri(key, title, icon, height, search=False, labeler=None, collapsed=False, hint=None):
+            card = ge.CollapsibleCard(fp, title=title, icon=icon, collapsed=collapsed)
+            card.pack(fill="x", pady=2)
+            self.cards[key] = card
+            if hint:
+                ttk.Label(card.body, text=hint, foreground="#64748b", font=("Segoe UI", 8),
+                          wraplength=340, justify="left").pack(anchor="w", pady=(0, 2))
+            t = TriList(card.body, height=height, search=search, labeler=labeler,
+                        on_change=lambda: self.schedule_filter(250), card=card)
+            t.pack(fill="both", expand=True)
+            self.tri[key] = t
+            return t, card
+
+        make_tri("durum", "İndirme Durumu", "⚡", 5, labeler=lambda k: ek.DURUMLAR.get(k, k or "?"))
+
+        _, c_kat = make_tri("kategori", "Evrak Kategorisi", "🏷️", 9,
+                            labeler=lambda k: ek.KATEGORI_ADI.get(k, k or "?"))
         self.v["kategori_ust"] = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fp, text="Eklerde ait olduğu evrakın kategorisine bak", variable=self.v["kategori_ust"],
-                        command=self.schedule_filter).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-        tri("tur", "Evrak türü (UYAP'taki gerçek türler)", 12, search=True, labeler=lambda k: k or "(türsüz)",
-            hint="Ekler, ait oldukları asıl evrakın türüyle süzülür.")
-        tri("birim", "Birim / mahkeme", 8, search=True)
-        tri("dosya_tur", "Dosya türü", 6)
-        tri("yargi", "Yargı", 4, labeler=lambda k: (k or "?").replace("_", " "))
-        tri("dosya_durum", "Dosya durumu", 2, labeler=lambda k: k or "?")
-        tri("uzanti", "Dosya biçimi (uzantı)", 5, labeler=lambda k: k or "Henüz bilinmiyor (indirilince belli olur)",
-            hint="İndirilmemiş asıl evrakların biçimini UYAP önceden bildirmez (çoğu .udf'dir).")
+        ttk.Checkbutton(c_kat.body, text="Eklerde asıl evrak kategorisine bak",
+                        variable=self.v["kategori_ust"],
+                        command=self.schedule_filter).pack(anchor="w", pady=(2, 0))
 
-        sec("Asıl evrak / ek")
+        make_tri("tur", "Evrak Türü (UYAP)", "📋", 10, search=True, labeler=lambda k: k or "(türsüz)",
+                 hint="Ekler, ait oldukları asıl evrakın türüyle süzülür.")
+        make_tri("birim", "Birim / Mahkeme", "🏛️", 8, search=True)
+        make_tri("dosya_tur", "Dosya Türü", "📁", 6)
+
+        # İkincil filtreler (Varsayılan olarak kapalı, yerden tasarruf)
+        make_tri("yargi", "Yargı Alanı", "⚖️", 4, collapsed=True,
+                 labeler=lambda k: (k or "?").replace("_", " "))
+        make_tri("dosya_durum", "Dosya Durumu", "📌", 2, collapsed=True,
+                 labeler=lambda k: k or "?")
+        make_tri("uzanti", "Dosya Biçimi (Uzantı)", "💾", 5, collapsed=True,
+                 labeler=lambda k: k or "Henüz bilinmiyor (indirilince belli olur)",
+                 hint="İndirilmemiş asıl evrakların biçimini UYAP önceden bildirmez (çoğu .udf'dir).")
+
+        # Asıl Evrak / Ekler Kartı
+        c_ek = ge.CollapsibleCard(fp, title="Asıl Evrak / Ekler", icon="📎", collapsed=True)
+        c_ek.pack(fill="x", pady=2)
+        self.cards["ek"] = c_ek
         self.v["ek"] = tk.StringVar(value="hepsi")
-        ef = ttk.Frame(fp); ef.grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-        for t, val in (("Hepsi", "hepsi"), ("Yalnız asıl evrak", "asil"), ("Yalnız ekler", "ek")):
-            ttk.Radiobutton(ef, text=t, variable=self.v["ek"], value=val, command=self.schedule_filter).pack(side="left")
+        ef = ttk.Frame(c_ek.body)
+        ef.pack(fill="x")
+        for t, val in (("Hepsi", "hepsi"), ("Yalnız Asıl", "asil"), ("Yalnız Ekler", "ek")):
+            ttk.Radiobutton(ef, text=t, variable=self.v["ek"], value=val, command=self.schedule_filter).pack(side="left", padx=2)
         self.v["ayni_ad_tek"] = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fp, text="Aynı dosyada aynı adlı ekleri bir kez al (tahmini)", variable=self.v["ayni_ad_tek"],
-                        command=self.schedule_filter).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Checkbutton(c_ek.body, text="Aynı dosyada aynı adlı ekleri bir kez al (tahmini)",
+                        variable=self.v["ayni_ad_tek"],
+                        command=self.schedule_filter).pack(anchor="w", pady=(3, 0))
 
-        sec("İndirme ayarları")
-        ttk.Label(fp, text="Bekleme (sn)").grid(row=r, column=0, sticky="w")
-        sf = ttk.Frame(fp); sf.grid(row=r, column=1, columnspan=2, sticky="w"); r += 1
+        # İndirme Ayarları Kartı
+        c_ayar = ge.CollapsibleCard(fp, title="İndirme & Klasör", icon="⚙️", collapsed=True)
+        c_ayar.pack(fill="x", pady=2)
+        self.cards["ayar"] = c_ayar
+        af = c_ayar.body
+        af.columnconfigure(1, weight=1)
+        ttk.Label(af, text="Bekleme (sn)").grid(row=0, column=0, sticky="w")
+        sf = ttk.Frame(af)
+        sf.grid(row=0, column=1, sticky="w", padx=(4, 0), pady=1)
         self.v["min_d"] = tk.StringVar(value=str(self.motor.min_d))
         self.v["max_d"] = tk.StringVar(value=str(self.motor.max_d))
         ttk.Entry(sf, textvariable=self.v["min_d"], width=5).pack(side="left")
-        ttk.Label(sf, text="–").pack(side="left")
+        ttk.Label(sf, text="–").pack(side="left", padx=2)
         ttk.Entry(sf, textvariable=self.v["max_d"], width=5).pack(side="left")
-        ttk.Label(fp, text="Klasör").grid(row=r, column=0, sticky="w")
-        self.v["dir"] = tk.StringVar(value=str(self.download_dir))
-        ttk.Entry(fp, textvariable=self.v["dir"], width=24).grid(row=r, column=1, sticky="we")
-        ttk.Button(fp, text="…", width=3, command=self.on_choose_dir).grid(row=r, column=2, sticky="w"); r += 1
 
-        bf = ttk.Frame(fp); bf.grid(row=r, column=0, columnspan=3, sticky="we", pady=(10, 4)); r += 1
-        ttk.Button(bf, text="Filtreleri sıfırla", command=self.reset_filters).pack(side="left")
-        fp.columnconfigure(1, weight=1)
+        ttk.Label(af, text="Klasör").grid(row=1, column=0, sticky="w", pady=(3, 0))
+        self.v["dir"] = tk.StringVar(value=str(self.download_dir))
+        df_frame = ttk.Frame(af)
+        df_frame.grid(row=1, column=1, sticky="we", padx=(4, 0), pady=(3, 0))
+        df_frame.columnconfigure(0, weight=1)
+        ttk.Entry(df_frame, textvariable=self.v["dir"]).grid(row=0, column=0, sticky="we")
+        ttk.Button(df_frame, text="…", width=3, command=self.on_choose_dir).grid(row=0, column=1, padx=(2, 0))
+
+        # Filtreleri Sıfırla Butonu
+        bf = ttk.Frame(fp)
+        bf.pack(fill="x", pady=(10, 8))
+        ttk.Button(bf, text="🔄 Tüm Filtreleri Sıfırla", command=self.reset_filters).pack(fill="x")
 
     # ------------------------------------------------------------------ filtre
     TEXT_KEYS = ("taraf", "muvekkil", "aciklama", "tur", "icerik", "dosya_no", "baslangic", "bitis", "son_gun")
@@ -548,17 +766,18 @@ class KatalogApp:
 
     def _show_results(self, n, rows):
         self.tree.delete(*self.tree.get_children())
-        for r in rows:
+        for idx, r in enumerate(rows):
             cached = bool(r["cache_path"]) and r["durum"] == "yeni"
-            tags = [r["durum"]] + (["ek"] if r["is_ek"] else []) + (["onbellek"] if cached else [])
+            stripe = "tek" if idx % 2 == 1 else "cift"
+            tags = [stripe, r["durum"]] + (["ek"] if r["is_ek"] else []) + (["onbellek"] if cached else [])
             evrak = f"   ↳ EK{int(r['sira'] or 0):02d}: {r['tur']}" if r["is_ek"] else r["tur"]
             self.tree.insert("", "end", iid=str(r["id"]), tags=tags, values=(
                 r["tarih"], r["birim"] or "", r["dosya_no"] or "", "Ek" if r["is_ek"] else "Asıl", evrak,
                 r["aciklama"] or "", ek.KATEGORI_ADI.get(r["kategori"], r["kategori"]),
                 ek.DURUMLAR.get(r["durum"], r["durum"]) + (" · önbellekte" if cached else "")))
         shown = f" (ilk {ROW_LIMIT} gösteriliyor)" if n > ROW_LIMIT else ""
-        self.lbl_count.config(text=f"{n:,} evrak{shown}".replace(",", "."))
-        self.btn_dl_all.config(text=f"Filtredekilerin tümünü indir ({n:,})".replace(",", "."))
+        self.lbl_count.config(text=f"📊 {n:,} evrak{shown}".replace(",", "."))
+        self.btn_dl_all.config(text=f"📥 Filtredekileri İndir ({n:,})".replace(",", "."))
 
     def refresh_facets(self):
         def run():
@@ -570,8 +789,10 @@ class KatalogApp:
 
     def _show_facets(self, fc, st):
         self.cb_muv["values"] = fc["muvekkiller"]
-        self.lbl_stats.config(text=(f"Katalog: {st['dosya']} dosya · {st['evrak']:,} evrak · "
-                                    f"{st['indirildi']:,} indirildi · {st['mukerrer']:,} mükerrer").replace(",", "."))
+        self.lbl_stat_dosya.config(text=f"📁 {st['dosya']} dosya")
+        self.lbl_stat_evrak.config(text=f"📄 {st['evrak']:,} evrak".replace(",", "."))
+        self.lbl_stat_indirildi.config(text=f"✅ {st['indirildi']:,} indirildi".replace(",", "."))
+        self.lbl_stat_mukerrer.config(text=f"🔁 {st['mukerrer']:,} mükerrer".replace(",", "."))
         if not st["evrak"]:
             self.log("[i] Katalog boş. Önce 'Bağlan / Giriş', sonra 'UYAP'ı Tara' ile evrak listesini çekin.")
 
@@ -596,6 +817,7 @@ class KatalogApp:
                     "ek": self.v["ek"].get(),
                     "tri": {k: t.state for k, t in self.tri.items()},
                     "sirala": {k: t.sort for k, t in self.tri.items()},
+                    "collapsed": {k: card.collapsed for k, card in getattr(self, "cards", {}).items()},
                     "ayar": {k: self.v[k].get() for k in ("min_d", "max_d", "dir")},
                     "gizli_tarayici": self.var_headless.get()}
             self.STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -620,6 +842,10 @@ class KatalogApp:
         for k, st in (data.get("tri") or {}).items():
             if k in self.tri:
                 self.tri[k].set_state({kk: int(vv) for kk, vv in st.items()}, notify=False)
+        for k, c_st in (data.get("collapsed") or {}).items():
+            if hasattr(self, "cards") and k in self.cards:
+                if bool(c_st) != self.cards[k].collapsed:
+                    self.cards[k].toggle()
         for k, val in (data.get("ayar") or {}).items():
             if k in self.v and val:
                 self.v[k].set(val)
@@ -648,15 +874,17 @@ class KatalogApp:
                 if kind == "log":
                     t = m[1]
                     tag = "hata" if t.startswith(("[x]", "[!]", "[-]")) else "ok" if t.startswith("[✓]") else \
-                        "pdf" if t.startswith("[pdf]") else ""
+                        "pdf" if t.startswith("[pdf]") else "drive" if "Drive" in t else \
+                        "watcher" if "Nöbetçi" in t else "warn" if t.startswith("[*]") else ""
                     self.txt_log.insert("end", time.strftime("%H:%M:%S ") + t + "\n", tag)
                     self.txt_log.see("end")
                     if int(self.txt_log.index("end-1c").split(".")[0]) > 3000:
                         self.txt_log.delete("1.0", "500.0")
                 elif kind == "progress":
                     _, done, total, text = m
-                    self.pbar.config(maximum=max(total, 1), value=done)
-                    self._prog_text = f"{done}/{total}  {text}"
+                    self.pbar.stop()
+                    self.pbar.config(mode="determinate", maximum=max(total, 1), value=done)
+                    self._prog_text = f"{done:,}/{total:,}  {text}".replace(",", ".")
                     self._last_progress = time.time()
                     self.lbl_prog.config(text=self._prog_text)
                 elif kind == "results" and m[1] == self._query_token:
@@ -668,13 +896,17 @@ class KatalogApp:
                 elif kind == "facets":
                     self._show_facets(m[1], m[2])
                 elif kind == "session":
-                    self.lbl_session.config(text=m[1], foreground="#1a7f37" if m[2] else "#a33")
+                    style = "Badge.Ok.TLabel" if m[2] else "Badge.Warn.TLabel"
+                    self.lbl_session_badge.config(text=m[1], style=style)
                 elif kind == "done":
                     self.busy = False
+                    self.pbar.stop()
+                    self.pbar.config(mode="determinate")
+                    self.lbl_activity.config(text="● Hazır", style="Badge.Ok.TLabel")
                     self.refresh_facets()
                     self.apply_filters()
                     if len(m) > 1 and m[1]:
-                        ge.bildirim(self.root, f"✓ {m[1]} tamamlandı")
+                        ge.bildirim(self.root, f"✓ {m[1]} işlemi tamamlandı.", renk="#15803d", baslik="Tamamlandı")
                 elif kind == "open":
                     try:
                         ge.dosya_ac(m[1])
@@ -682,7 +914,7 @@ class KatalogApp:
                         self.log(f"[!] Açılamadı: {e}")
                     self.apply_filters()
                 elif kind == "toast":
-                    ge.bildirim(self.root, m[1], m[2] if len(m) > 2 else "#1f3a5f")
+                    ge.bildirim(self.root, m[1], m[2] if len(m) > 2 else "#1e3a5f", baslik=m[3] if len(m) > 3 else "UYAP")
                 elif kind == "ask_login":
                     self._ask_login(*m[1:])
         except queue.Empty:
@@ -694,15 +926,45 @@ class KatalogApp:
         if not getattr(self, "_closing", False):
             self.root.after(100, self._drain)
 
+    def _animate(self):
+        """Kullanıcı arayüzünde canlı aktivite spinner ve nabız animasyonları."""
+        try:
+            self._anim_frame = (getattr(self, "_anim_frame", 0) + 1) % 120
+
+            # 1. İşlem devam ediyorsa yumuşak aktivite spinner'ı
+            if self.busy:
+                spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                glyph = spinners[(self._anim_frame // 2) % len(spinners)]
+                task_name = getattr(self, "_current_task_name", "İşlem sürüyor")
+                self.lbl_activity.config(text=f"{glyph} {task_name}", style="Badge.Warn.TLabel")
+            else:
+                self.lbl_activity.config(text="● Hazır", style="Badge.Ok.TLabel")
+
+            # 2. Nöbetçi Bot açıksa canlı nabız (heartbeat) efekti
+            if self.var_watcher_active.get():
+                pulse_glyphs = ["🟢", "⚪"]
+                glyph = pulse_glyphs[(self._anim_frame // 6) % 2]
+                self.btn_watcher.config(text=f"👁 Nöbetçi: AÇIK {glyph}", style="Badge.Watcher.TLabel")
+        except Exception:
+            pass
+        if not getattr(self, "_closing", False):
+            self.root.after(100, self._animate)
+
     def _submit(self, name, fn):
         if self.busy:
             messagebox.showinfo("Meşgul", "Önceki işlem sürüyor. Bitmesini bekleyin veya 'Durdur'a basın.")
             return
         self.busy = True
+        self._current_task_name = name
+        prevent_sleep(True)
         self._last_progress = time.time()
         self.motor.stop_flag.clear()
         self.motor.pause_flag.clear()
-        self.btn_pause.config(text="Duraklat")
+        self.btn_pause.config(text="⏸️ Duraklat")
+        if name == "Tarama":
+            self.pbar.config(mode="indeterminate")
+            self.pbar.start(15)
+            self.lbl_prog.config(text="UYAP dosyaları ve evrak listeleri taranıyor...")
         self.work_q.put((name, fn))
 
     def _worker(self):
@@ -716,6 +978,7 @@ class KatalogApp:
                 self.ui.file_logger.exception("katalog_gui %s", name)
                 self.log(f"[x] {name} hatası: {e}")
             finally:
+                prevent_sleep(False)
                 self.ui_q.put(("done", name))
 
     def _startup_sync(self):
@@ -729,6 +992,7 @@ class KatalogApp:
             self.log(f"[!] Disk kontrolü yapılamadı: {e}")
 
     def _on_close(self):
+        prevent_sleep(False)
         self._save_state()
         self._closing = True
         self.root.destroy()
@@ -789,15 +1053,18 @@ class KatalogApp:
 
     def _session_ok(self, user: dict):
         ad = " ".join(str(user.get(k) or "") for k in ("adi", "soyadi")).strip() or "giriş yapıldı"
-        self.ui_q.put(("session", f"Oturum: açık ({ad})", True))
+        self.ui_q.put(("session", f"● Oturum: Açık ({ad})", True))
 
     def _relogin_worker(self) -> bool:
         """Oturumu yeniler. Kayıtlı yöntem başarısız olursa (ör. kart okunamadı) kullanıcıya bir kez
         daha sorar: kartı yeniden takıp tekrar deneyebilir veya Mobil İmza'ya geçebilir."""
-        self.ui_q.put(("session", "Oturum: kapalı — giriş gerekiyor", False))
+        self.ui_q.put(("session", "● Oturum: Kapalı — Giriş Gerekiyor", False))
         for deneme in range(2):
-            if not self.login_method and not self._ask_method_blocking():
-                return False
+            if not self.login_method:
+                if getattr(ui, "DEFAULT_E_IMZA_PIN", None) and deneme == 0:
+                    self.login_method = ("eimza", ui.DEFAULT_E_IMZA_PIN)
+                elif not self._ask_method_blocking():
+                    return False
             m = self.login_method
             if m[0] == "elle":
                 ok, msg = self._manual_login()
@@ -817,8 +1084,62 @@ class KatalogApp:
                          "çıkarıp takın veya ArkSigner'ı yeniden başlatın. Ya da Mobil İmza'yı seçin.")
             # Yanlış PIN tekrar denenmez (kart blokesine karşı); her durumda yöntemi yeniden sor
             self.login_method = None
-            self.ui_q.put(("session", "Oturum: kapalı", False))
+            self.ui_q.put(("session", "● Oturum: Kapalı", False))
         return False
+
+    def _check_drive_status(self):
+        """Google Drive durumunu tespit eder ve rozeti günceller."""
+        try:
+            from drive_aktarici import detect_target_drive_dir
+            d = detect_target_drive_dir()
+            if d and d.exists():
+                self.lbl_drive_badge.config(text=f"☁ Drive: Bağlı ({d.name})", style="Badge.Drive.TLabel")
+            else:
+                self.lbl_drive_badge.config(text="☁ Drive: Yerel Klasör", style="Badge.Warn.TLabel")
+        except Exception:
+            pass
+
+    def toggle_watcher_mode(self):
+        """GUI içinden Nöbetçi Bot'u başlatır veya durdurur."""
+        cur = self.var_watcher_active.get()
+        self.var_watcher_active.set(not cur)
+        if not cur:
+            self.btn_watcher.config(text="👁 Nöbetçi: AÇIK", style="Badge.Watcher.TLabel")
+            ge.bildirim(self.root, "🛡️ Nöbetçi Bot Devrede!\nAçık dosyalar ve eksik evraklar arka planda Google Drive'a eşitleniyor.", renk="#6b21a8")
+            self.log("[*] Nöbetçi Bot modu aktif edildi (arka plan izleme ve Drive eşitleme devrede).")
+            threading.Thread(target=self._watcher_background_cycle, daemon=True).start()
+        else:
+            self.btn_watcher.config(text="👁 Nöbetçi Modu", style="Watcher.TButton")
+            ge.bildirim(self.root, "Nöbetçi Bot durduruldu.")
+            self.log("[i] Nöbetçi Bot modu durduruldu.")
+
+    def _watcher_background_cycle(self):
+        """Nöbetçi botun periyodik kontrol döngüsü."""
+        import uyap_watcher as uw
+        while self.var_watcher_active.get():
+            try:
+                cfg = uw.load_config()
+                watcher = uw.UyapWatcher(cfg)
+                if watcher.connect_bridge():
+                    watcher.heartbeat()
+                    if cfg.get("auto_download_missing", True):
+                        self.log("[Nöbetçi] Eksik evraklar taranıyor ve Google Drive'a eşitleniyor...")
+                        m_done = watcher.reconcile_missing_docs(max_batch=30)
+                        if m_done > 0:
+                            self.log(f"[Nöbetçi] {m_done} eksik evrak tamamlandı ve Google Drive'a eşitlendi.")
+                            self.ui_q.put(("done",))
+                    self.log("[Nöbetçi] Açık dosyalar ve duruşmalar kontrol ediliyor...")
+                    watcher.check_upcoming_hearings()
+                    st = watcher.scan_open_cases()
+                    if st.get("new_downloaded", 0) > 0:
+                        self.log(f"[Nöbetçi] {st['new_downloaded']} yeni evrak Google Drive'a aktarıldı.")
+                        self.ui_q.put(("done",))
+            except Exception as e:
+                self.log(f"[Nöbetçi] Kontrol uyarısı: {e}")
+            for _ in range(15 * 60):  # 15 dakika bekle
+                if not self.var_watcher_active.get():
+                    return
+                time.sleep(1)
 
     def _manual_login(self, bekle_sn: int = 300) -> tuple:
         """Görünür tarayıcıda UYAP giriş sayfasını açar; kullanıcı girene kadar bekler."""
@@ -1091,7 +1412,13 @@ class KatalogApp:
     def _on_resize(self, e):
         if e.widget is not self.root:
             return
-        narrow = e.width < 1000
+        w = e.width
+        if hasattr(self, "lbl_copy"):
+            if w < 1050:
+                self.lbl_copy.pack_forget()
+            else:
+                self.lbl_copy.pack(side="right", padx=(8, 0))
+        narrow = w < 960
         if narrow != getattr(self, "_narrow", None):
             self._narrow = narrow
             self.toggle_filters(not narrow)
@@ -1226,14 +1553,14 @@ class KatalogApp:
             self.log(f"[x] Günlükler paketlenemedi: {e}")
 
 
-def main():
+def main(watcher_mode: bool = False):
     try:  # Windows: yüksek DPI ekranlarda bulanık görünmesin
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
     root = tk.Tk()
-    KatalogApp(root)
+    KatalogApp(root, watcher_mode=watcher_mode)
     root.mainloop()
 
 

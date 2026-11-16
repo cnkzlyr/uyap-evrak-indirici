@@ -18,17 +18,25 @@ import tkinter as tk
 from tkinter import ttk
 
 UYGULAMA_ADI = "UYAP Evrak Yöneticisi"
-SURUM = "3.0.0"
+SURUM = "3.2.0"
 IMZA = "© 2026 Av. Can KIZILYAR — Tüm hakları saklıdır."
 
 RENK = {
-    "lacivert": "#1f3a5f", "lacivert2": "#2b4f7e", "acik": "#f4f6fa", "yesil": "#1a7f37",
-    "kirmizi": "#a31515", "gri": "#6b7280", "vurgu": "#d9e6f7",
+    "lacivert": "#0f2744", "lacivert2": "#1e3a5f", "acik": "#f8fafc",
+    "kart_bg": "#ffffff", "kart_border": "#e2e8f0",
+    "yesil": "#10b981", "kirmizi": "#ef4444", "gri": "#64748b",
+    "vurgu": "#2563eb", "mavi": "#0284c7", "mor": "#8b5cf6", "sari": "#f59e0b",
+    "badge_yesil_bg": "#dcfce7", "badge_yesil_fg": "#15803d",
+    "badge_sari_bg": "#fef3c7", "badge_sari_fg": "#b45309",
+    "badge_kirmizi_bg": "#fee2e2", "badge_kirmizi_fg": "#b91c1c",
+    "badge_mavi_bg": "#e0f2fe", "badge_mavi_fg": "#0284c7",
+    "badge_mor_bg": "#f3e8ff", "badge_mor_fg": "#7e22ce",
+    "badge_gri_bg": "#f1f5f9", "badge_gri_fg": "#334155",
 }
 
 
 # ---------------------------------------------------------------------------
-# Görünüm
+# Görünüm ve Modern Stil
 # ---------------------------------------------------------------------------
 def stil_uygula(root: tk.Tk):
     st = ttk.Style(root)
@@ -39,22 +47,90 @@ def stil_uygula(root: tk.Tk):
         except tk.TclError:
             continue
     f = ("Segoe UI", 9) if os.name == "nt" else ("DejaVu Sans", 9)
-    st.configure("Treeview", rowheight=24, font=f)
+    st.configure("Treeview", rowheight=26, font=f)
     st.configure("Treeview.Heading", font=(f[0], 9, "bold"))
     st.configure("Baslik.TFrame", background=RENK["lacivert"])
-    st.configure("Baslik.TLabel", background=RENK["lacivert"], foreground="white", font=(f[0], 13, "bold"))
-    st.configure("Imza.TLabel", background=RENK["lacivert"], foreground="#c9d6ea", font=(f[0], 9))
+    st.configure("Baslik.TLabel", background=RENK["lacivert"], foreground="white", font=(f[0], 12, "bold"))
+    st.configure("Imza.TLabel", background=RENK["lacivert"], foreground="#94a3b8", font=(f[0], 8))
     st.configure("Vurgu.TButton", font=(f[0], 9, "bold"))
+    st.configure("Watcher.TButton", font=(f[0], 9, "bold"))
+    st.configure("Action.TButton", font=(f[0], 9))
     st.configure("Ayrinti.TLabelframe.Label", font=(f[0], 9, "bold"))
     st.configure("Ipucu.TLabel", foreground=RENK["gri"])
+
+    # Modern Durum Rozetleri (Badges)
+    st.configure("Badge.Ok.TLabel", background="#dcfce7", foreground="#15803d", font=(f[0], 8, "bold"), padding=(8, 3))
+    st.configure("Badge.Warn.TLabel", background="#fef3c7", foreground="#b45309", font=(f[0], 8, "bold"), padding=(8, 3))
+    st.configure("Badge.Err.TLabel", background="#fee2e2", foreground="#b91c1c", font=(f[0], 8, "bold"), padding=(8, 3))
+    st.configure("Badge.Drive.TLabel", background="#e0f2fe", foreground="#0284c7", font=(f[0], 8, "bold"), padding=(8, 3))
+    st.configure("Badge.Watcher.TLabel", background="#f3e8ff", foreground="#7e22ce", font=(f[0], 8, "bold"), padding=(8, 3))
+    st.configure("Badge.Count.TLabel", background="#f1f5f9", foreground="#475569", font=(f[0], 8, "bold"), padding=(6, 2))
+    st.configure("Badge.Metric.TLabel", background="#ffffff", foreground="#0f172a", font=(f[0], 9, "bold"), padding=(8, 4))
+
+    # Kart Stilleri
+    st.configure("Card.TLabelframe", background="#ffffff")
+    st.configure("Card.TLabelframe.Label", font=(f[0], 9, "bold"), foreground=RENK["lacivert2"])
+
     root.option_add("*Listbox.font", f)
     root.option_add("*Text.font", ("Consolas", 9))
+    root.option_add("*Listbox.background", "#ffffff")
+    root.option_add("*Listbox.selectBackground", "#e0edff")
+    root.option_add("*Listbox.selectForeground", "#0f172a")
+
+
+# ---------------------------------------------------------------------------
+# Katlanabilir Kart Bileşeni (Collapsible Card)
+# ---------------------------------------------------------------------------
+class CollapsibleCard(ttk.Frame):
+    """Modern, katlanabilir ve sağında rozet taşıyan filtre kartı."""
+
+    def __init__(self, master, title: str = "Filtre", icon: str = "📁", collapsed: bool = False, on_toggle=None, **kw):
+        super().__init__(master, **kw)
+        self.collapsed = collapsed
+        self.on_toggle = on_toggle
+
+        # Başlık Çubuğu
+        self.hdr = ttk.Frame(self, cursor="hand2")
+        self.hdr.pack(fill="x", pady=(3, 1))
+
+        self.btn_toggle = ttk.Label(self.hdr, text="▼" if not collapsed else "►", width=2,
+                                    font=("Segoe UI", 9, "bold"), foreground=RENK["lacivert2"])
+        self.btn_toggle.pack(side="left")
+
+        self.lbl_title = ttk.Label(self.hdr, text=f"{icon}  {title}", font=("Segoe UI", 9, "bold"),
+                                   foreground=RENK["lacivert2"])
+        self.lbl_title.pack(side="left", padx=2)
+
+        self.lbl_badge = ttk.Label(self.hdr, text="Tümü", style="Badge.Count.TLabel")
+        self.lbl_badge.pack(side="right", padx=(0, 2))
+
+        # Gövde Çerçevesi
+        self.body = ttk.Frame(self, padding=(2, 2, 2, 4))
+        if not collapsed:
+            self.body.pack(fill="both", expand=True)
+
+        for w in (self.hdr, self.btn_toggle, self.lbl_title):
+            w.bind("<Button-1>", lambda e: self.toggle())
+
+    def toggle(self):
+        self.collapsed = not self.collapsed
+        if self.collapsed:
+            self.body.pack_forget()
+            self.btn_toggle.config(text="►")
+        else:
+            self.body.pack(fill="both", expand=True)
+            self.btn_toggle.config(text="▼")
+        if self.on_toggle:
+            self.on_toggle(self.collapsed)
+
+    def set_badge(self, text: str, style: str = "Badge.Count.TLabel"):
+        self.lbl_badge.config(text=text, style=style)
 
 
 class Ipucu:
-    """Fare üzerine gelince açıklama gösteren küçük kutu."""
+    """Fare üzerine gelince açıklama gösteren ve ekran sınırlarına duyarlı kutu."""
 
-    def __init__(self, widget, metin: str, gecikme: int = 450):
+    def __init__(self, widget, metin: str, gecikme: int = 400):
         self.w, self.metin, self.gecikme = widget, metin, gecikme
         self.tip = None
         self._id = None
@@ -68,56 +144,124 @@ class Ipucu:
     def _goster(self):
         if self.tip:
             return
-        x = self.w.winfo_rootx() + 12
-        y = self.w.winfo_rooty() + self.w.winfo_height() + 4
         self.tip = tk.Toplevel(self.w)
         self.tip.wm_overrideredirect(True)
+        try:
+            self.tip.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        lbl = tk.Label(self.tip, text=self.metin, justify="left", background="#0f172a", foreground="#f8fafc",
+                       relief="flat", borderwidth=1, wraplength=420, padx=10, pady=6, font=("Segoe UI", 8))
+        lbl.pack()
+        self.tip.update_idletasks()
+        tw, th = self.tip.winfo_reqwidth(), self.tip.winfo_reqheight()
+
+        x = self.w.winfo_rootx() + 10
+        y = self.w.winfo_rooty() + self.w.winfo_height() + 4
+
+        # Ekran taşma kontrolü
+        sw = self.w.winfo_screenwidth()
+        sh = self.w.winfo_screenheight()
+        if x + tw > sw - 12:
+            x = max(10, sw - tw - 12)
+        if y + th > sh - 12:
+            y = max(10, self.w.winfo_rooty() - th - 4)
+
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.metin, justify="left", background="#fffbe6", relief="solid", borderwidth=1,
-                 wraplength=420, padx=8, pady=5).pack()
 
     def _kapat(self, _e=None):
         if self._id:
             self.w.after_cancel(self._id)
             self._id = None
         if self.tip:
-            self.tip.destroy()
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
             self.tip = None
 
 
-def bildirim(root: tk.Tk, metin: str, renk: str = "#1f3a5f", sure: int = 3500):
-    """Sağ altta yumuşak açılıp kapanan (fade) bildirim."""
+def bildirim(root: tk.Tk, metin: str, renk: str = "#1e3a5f", sure: int = 3500, baslik: str | None = None):
+    """Sağ altta yumuşak kayma ve şeffaflık (slide-up + fade) animasyonlu modern bildirim kartı."""
     try:
         t = tk.Toplevel(root)
         t.wm_overrideredirect(True)
-        t.attributes("-topmost", True)
         try:
+            t.attributes("-topmost", True)
             t.attributes("-alpha", 0.0)
         except tk.TclError:
             pass
-        tk.Label(t, text=metin, background=renk, foreground="white", padx=16, pady=10, wraplength=380,
-                 justify="left", font=("Segoe UI", 10)).pack()
+
+        # Kart İçeriği
+        cf = tk.Frame(t, background=renk, borderwidth=1, relief="solid")
+        cf.pack(fill="both", expand=True)
+
+        top_f = tk.Frame(cf, background=renk)
+        top_f.pack(fill="x", padx=12, pady=(8, 2))
+        
+        b_lbl = tk.Label(top_f, text=baslik or "UYAP Bildirimi", background=renk, foreground="#ffffff",
+                         font=("Segoe UI", 9, "bold"))
+        b_lbl.pack(side="left")
+
+        def dismiss():
+            try:
+                t.destroy()
+            except Exception:
+                pass
+
+        btn_x = tk.Label(top_f, text="✕", background=renk, foreground="#cbd5e1", font=("Segoe UI", 8, "bold"),
+                         cursor="hand2")
+        btn_x.pack(side="right")
+        btn_x.bind("<Button-1>", lambda e: dismiss())
+
+        msg_lbl = tk.Label(cf, text=metin, background=renk, foreground="#f8fafc", padx=12, pady=6,
+                           wraplength=380, justify="left", font=("Segoe UI", 9))
+        msg_lbl.pack(fill="both")
+
         root.update_idletasks()
         w, h = t.winfo_reqwidth(), t.winfo_reqheight()
-        x = root.winfo_rootx() + root.winfo_width() - w - 24
-        y = root.winfo_rooty() + root.winfo_height() - h - 24
-        t.wm_geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        target_x = root.winfo_rootx() + root.winfo_width() - w - 24
+        target_y = root.winfo_rooty() + root.winfo_height() - h - 24
+        start_y = target_y + 35
+        t.wm_geometry(f"{w}x{h}+{max(target_x, 0)}+{max(start_y, 0)}")
 
-        def fade(a, step):
-            try:
-                t.attributes("-alpha", a)
-            except tk.TclError:
+        # Kayma ve belirme animasyonu (Slide up + Fade in)
+        steps = 6
+        step_ms = 22
+
+        def slide_in(i):
+            if not t.winfo_exists():
                 return
-            if step > 0 and a < 0.95:
-                t.after(20, fade, min(a + 0.08, 0.95), step)
-            elif step > 0:
-                t.after(sure, fade, 0.95, -1)
-            elif a > 0.05:
-                t.after(25, fade, a - 0.07, -1)
+            curr_y = int(start_y - (start_y - target_y) * (i / steps))
+            alpha = min(0.96, (i / steps))
+            try:
+                t.wm_geometry(f"{w}x{h}+{max(target_x, 0)}+{max(curr_y, 0)}")
+                t.attributes("-alpha", alpha)
+            except Exception:
+                return
+            if i < steps:
+                t.after(step_ms, slide_in, i + 1)
             else:
-                t.destroy()
-        fade(0.0, 1)
-    except tk.TclError:
+                t.after(sure, start_fade_out)
+
+        def start_fade_out():
+            fade_out(0.96)
+
+        def fade_out(a):
+            if not t.winfo_exists():
+                return
+            try:
+                if a > 0.08:
+                    t.attributes("-alpha", a)
+                    t.after(step_ms, fade_out, a - 0.12)
+                else:
+                    t.destroy()
+            except Exception:
+                pass
+
+        slide_in(1)
+    except Exception:
         pass
 
 
