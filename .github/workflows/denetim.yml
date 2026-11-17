@@ -1,0 +1,22 @@
+# Her push/PR'da hızlı statik denetim: sözdizimi ve çalışma anında NameError'a yol açacak hatalar.
+name: Denetim
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pyflakes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyflakes
+      - name: Sözdizimi
+        run: python -m compileall -q $(git ls-files '*.py')
+      - name: Tanımsız isimler
+        run: |
+          pyflakes $(git ls-files '*.py') | tee pyflakes.txt || true
+          ! grep -E "undefined name|referenced before assignment" pyflakes.txt

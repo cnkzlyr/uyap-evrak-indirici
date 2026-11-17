@@ -699,6 +699,7 @@ class UyapWatcher:
         if not self.bridge:
             return 0
         if not self.motor:
+            import uyap_indirici as ui
             relogin_fn = (lambda: self.bridge.auto_relogin(pin=ui.DEFAULT_E_IMZA_PIN)[0]) if getattr(ui, "DEFAULT_E_IMZA_PIN", None) else None
             self.motor = ek.Motor(self.bridge, self.katalog, self.download_dir, log=logger.info, relogin=relogin_fn)
 

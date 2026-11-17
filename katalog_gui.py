@@ -1058,6 +1058,7 @@ class KatalogApp:
     def _relogin_worker(self) -> bool:
         """Oturumu yeniler. Kayıtlı yöntem başarısız olursa (ör. kart okunamadı) kullanıcıya bir kez
         daha sorar: kartı yeniden takıp tekrar deneyebilir veya Mobil İmza'ya geçebilir."""
+        import uyap_indirici as ui
         self.ui_q.put(("session", "● Oturum: Kapalı — Giriş Gerekiyor", False))
         for deneme in range(2):
             if not self.login_method:
