@@ -843,13 +843,14 @@ class UyapBrowserBridge:
         cmd = [
             chrome_bin,
             f"--remote-debugging-port={self.port}",
-            "--remote-debugging-address=127.0.0.1",
             "--remote-allow-origins=*",
             f"--user-data-dir={CHROME_PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-session-crashed-bubble",
         ]
+        if not IS_TERMUX:
+            cmd.insert(2, "--remote-debugging-address=127.0.0.1")
         has_display = self._detect_display()
         if self.is_headless or not has_display:
             self.is_headless = True
@@ -906,14 +907,18 @@ class UyapBrowserBridge:
     # ------------------------------------------------------------------
     def _cdp_http(self, path: str, method: str = "GET", timeout: float = 2.5):
         """CDP HTTP uç noktası; bağlantı yoksa None döner (istisna fırlatmaz)."""
-        url = f"http://127.0.0.1:{self.port}{path}"
-        try:
-            r = self._http.request(method, url, timeout=timeout)
-            if r.status_code != 200:
-                return None
-            return r.json()
-        except Exception:
-            return None
+        cur = getattr(self, "_cdp_host", "127.0.0.1")
+        hosts = [cur, "[::1]"] if cur == "127.0.0.1" else [cur, "127.0.0.1"]
+        for h in hosts:
+            url = f"http://{h}:{self.port}{path}"
+            try:
+                r = self._http.request(method, url, timeout=timeout)
+                if r.status_code == 200:
+                    self._cdp_host = h
+                    return r.json()
+            except Exception:
+                continue
+        return None
 
     def _is_port_open(self) -> bool:
         info = self._cdp_http("/json/version", timeout=1.5)
@@ -928,10 +933,11 @@ class UyapBrowserBridge:
             return None
         return [t for t in tabs if t.get("type") == "page"]
 
-    @staticmethod
-    def _ws_url(tab: dict) -> str:
+    def _ws_url(self, tab: dict) -> str:
         ws = tab.get("webSocketDebuggerUrl") or ""
-        # 'localhost' bazı Windows makinelerde ::1'e çözülüp bağlantıyı reddeder
+        host = getattr(self, "_cdp_host", "127.0.0.1")
+        if host == "[::1]":
+            return ws.replace("ws://localhost:", "ws://[::1]:").replace("ws://127.0.0.1:", "ws://[::1]:")
         return ws.replace("ws://localhost:", "ws://127.0.0.1:")
 
     def _pick(self, pages: list, target: str) -> dict | None:
