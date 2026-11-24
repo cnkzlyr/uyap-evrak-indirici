@@ -43,3 +43,8 @@ scratch/
 
 G:*
 *Drive*
+
+# Arka plan servis ve durum dosyalari
+*.pid
+drive_esitle_status.json
+drive_durum_raporu.json

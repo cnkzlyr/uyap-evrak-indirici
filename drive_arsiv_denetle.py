@@ -177,6 +177,13 @@ def denetle():
             sorunlu_listesi.append(rec)
         mevcut_listesi.append(rec)
 
+    # Yerel dosya token seti oluştur
+    local_tokens = set()
+    for x in mevcut_listesi:
+        local_tokens.add(x["dosya_adi"])
+        for tok in re.findall(r'[a-zA-Z0-9_-]{4,}', x["dosya_adi"]):
+            local_tokens.add(tok)
+
     # 4. UYAP Kataloğu (uyap_katalog.db) ile Karşılaştırma
     katalog_evrak_sayisi = 0
     katalog_dosya_sayisi = 0
@@ -210,9 +217,9 @@ def denetle():
                 # Drive veya yerel arşivde var mı?
                 in_drive = (evrak_uuid in drive_index) or (gercek_id in drive_index) or (str(eid) in drive_index)
                 in_local = False
-                if path and Path(path).exists():
+                if (path and Path(path).exists()) or (pdf_path and Path(pdf_path).exists()):
                     in_local = True
-                if pdf_path and Path(pdf_path).exists():
+                elif (evrak_uuid and evrak_uuid in local_tokens) or (gercek_id and gercek_id in local_tokens):
                     in_local = True
 
                 if not in_drive and not in_local:
