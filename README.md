@@ -4,6 +4,9 @@
 
 UYAP Avukat Portal (`https://avukat.uyap.gov.tr`) üzerindeki tüm derdest ve kapalı dava dosyalarının evraklarını ve eklerini **kataloglayan, filtreleyerek seçtiren, her evrakı yalnızca bir kez indiren, PDF'e dönüştüren ve görüntüleyen** masaüstü uygulaması. Windows, Linux, macOS (Intel + Apple Silicon) ve Android (Termux:X11) üzerinde çalışır.
 
+> [!TIP]
+> 📖 **Adım Adım Kolay Tutorial:** Tek komutla dava indirme ve Drive senkronizasyonu (`uyap-arsiv`) ile sessiz e-imza (`uyap-imzala`) kullanımı için hazırlanmış detaylı rehber: **[KILAVUZ_VE_TUTORIAL.md](KILAVUZ_VE_TUTORIAL.md)**
+
 ---
 
 ## 🆕 Sürüm 3.0 — Neler var?
