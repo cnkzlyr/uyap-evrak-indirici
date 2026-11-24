@@ -63,11 +63,17 @@ def jars_dir() -> Path | None:
     cands = [Path(env)] if env else []
     cands += list(_candidates("jars"))
     home = Path.home()
-    cands += [home / ".uyap_evrak" / "jars", home / "UYAPEditorModern" / "jars",
+    cands += [home / ".uyap_evrak" / "jars", home / "UYAPEditorModern" / "jars", home / "UYAPEditorModern",
               Path("/data/data/com.termux/files/home/jars")]
-    for pf in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
+    for env_dir in (os.environ.get("LOCALAPPDATA"), os.environ.get("APPDATA")):
+        if env_dir:
+            ed = Path(env_dir)
+            cands += [ed / "UYAPEditorModern", ed / "UYAPEditorModern" / "jars",
+                      ed / "com.caneditor.app" / "uyap-editor" / "editor",
+                      ed / "CanEditor" / "uyap-editor" / "editor"]
+    for pf in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA"), r"C:\\"):
         if pf:
-            for name in ("UYAP Editor", "UYAP Editör", "UYAPEditor", "UYAP\\UYAP Editor"):
+            for name in ("UYAP Editor", "UYAP Editör", "UYAPEditor", "UYAP\\UYAP Editor", "Uyap", "UYAP"):
                 cands += [Path(pf) / name / "lib", Path(pf) / name / "jars", Path(pf) / name]
     for c in cands:
         try:
@@ -86,37 +92,96 @@ def font_dirs() -> list[str]:
 
 
 def udf_hazir_mi() -> tuple[bool, str]:
-    if not java_exe():
-        return False, "Java bulunamadı (paketle gelen JRE veya sistem Java'sı gerekli)."
-    if not jars_dir():
-        return False, ("UYAP Editör kütüphaneleri (editor_*.jar) bulunamadı. UYAP Editör kurulu değilse "
-                       "jar dosyalarını uygulama klasöründeki 'jars' klasörüne koyun veya UYAP_JARS ile gösterin.")
-    return True, ""
+    if java_exe() and jars_dir():
+        return True, ""
+    try:
+        import reportlab
+        return True, ""
+    except ImportError:
+        return False, "Java veya ReportLab kütüphanesi bulunamadı."
+
+
+def udf_python_to_pdf(path: Path, dst: Path | None = None) -> Path | None:
+    """Java olmadan, saf Python (ReportLab) ile UDF'i yüksek uyumlu A4 PDF'e dönüştürür."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    if dst is None:
+        dst = path.with_suffix(".pdf")
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib import colors
+
+        with zipfile.ZipFile(path, 'r') as z:
+            xml_bytes = z.read('content.xml')
+        root = ET.fromstring(xml_bytes)
+
+        styles = getSampleStyleSheet()
+        normal = styles['Normal']
+        normal.fontName = 'Helvetica'
+        normal.fontSize = 11
+        normal.leading = 14
+        normal.textColor = colors.HexColor('#212121')
+
+        story = []
+        for elem in root.iter():
+            txt = (elem.text or '').strip()
+            if txt:
+                clean_txt = txt.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                story.append(Paragraph(clean_txt, normal))
+                story.append(Spacer(1, 6))
+
+        if not story:
+            story.append(Paragraph("Belge boş.", normal))
+
+        doc = SimpleDocTemplate(str(dst), pagesize=A4, leftMargin=50, rightMargin=50, topMargin=50, bottomMargin=50)
+        doc.build(story)
+        if dst.exists() and dst.stat().st_size > 0:
+            return dst
+    except Exception as e:
+        print(f"[!] udf_python_to_pdf hatası ({path}): {e}")
+    return None
 
 
 def udf_to_pdf(path: Path, timeout: int = 120) -> Path | None:
     """Tek UDF dosyasını veya bir klasördeki tüm UDF'leri (PDF'i olmayanları) dönüştürür."""
     path = Path(path)
     java, jars = java_exe(), jars_dir()
-    if not java or not jars:
-        return None
-    classes = next((str(c) for c in _candidates() if (c / "uyap" / "UdfBatchPdfConverter.class").exists()), str(BASE_DIR))
-    env = dict(os.environ)
-    fd = font_dirs()
-    if fd:
-        env["UYAP_FONT_DIR"] = os.pathsep.join(fd + ([env["UYAP_FONT_DIR"]] if env.get("UYAP_FONT_DIR") else []))
-    cmd = [java, "-Xmx512m", "-Djava.awt.headless=true", "-Dfile.encoding=UTF-8",
-           "--add-opens=java.base/java.util=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED",
-           "--add-opens=java.desktop/java.awt=ALL-UNNAMED", "--add-opens=java.desktop/javax.swing=ALL-UNNAMED",
-           "-cp", f"{classes}{os.pathsep}{jars / '*'}", "uyap.UdfBatchPdfConverter", str(path)]
-    try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, env=env, **_NO_WINDOW)
-    except subprocess.TimeoutExpired:
-        return None
-    except OSError:
-        return None
-    pdf = path.with_suffix(".pdf")
-    return pdf if path.is_file() and pdf.exists() and pdf.stat().st_size > 0 else (path if path.is_dir() else None)
+    if java and jars:
+        classes = next((str(c) for c in _candidates() if (c / "uyap" / "UdfBatchPdfConverter.class").exists()), str(BASE_DIR))
+        env = dict(os.environ)
+        fd = font_dirs()
+        if fd:
+            env["UYAP_FONT_DIR"] = os.pathsep.join(fd + ([env["UYAP_FONT_DIR"]] if env.get("UYAP_FONT_DIR") else []))
+        cmd = [java, "-Xmx512m", "-Djava.awt.headless=true", "-Dfile.encoding=UTF-8",
+               "--add-opens=java.base/java.util=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+               "--add-opens=java.desktop/java.awt=ALL-UNNAMED", "--add-opens=java.desktop/javax.swing=ALL-UNNAMED",
+               "-cp", f"{classes}{os.pathsep}{jars / '*'}", "uyap.UdfBatchPdfConverter", str(path)]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, env=env, **_NO_WINDOW)
+            if res.returncode == 0:
+                pdf = path.with_suffix(".pdf")
+                if path.is_file() and pdf.exists() and pdf.stat().st_size > 0:
+                    return pdf
+                if path.is_dir():
+                    return path
+        except Exception:
+            pass
+
+    # Java yoksa veya başarısız olduysa: Saf Python ReportLab motoru ile dönüştür
+    if path.is_file():
+        return udf_python_to_pdf(path)
+    if path.is_dir():
+        for f in path.rglob("*.udf"):
+            pdf_f = f.with_suffix(".pdf")
+            if not pdf_f.exists() or pdf_f.stat().st_size == 0:
+                udf_python_to_pdf(f, pdf_f)
+        return path
+    return None
 
 
 # ---------------------------------------------------------------------------

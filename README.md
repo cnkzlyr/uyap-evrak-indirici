@@ -399,32 +399,44 @@ msedge.exe --remote-debugging-port=9223 --user-data-dir="%LOCALAPPDATA%\Microsof
 
 ---
 
-### 3. Adım 2: İnteraktif Windows Menüsü ile Kullanım (`baslat_windows.bat`)
+### 3. Kullanım Seçenekleri: Modern GUI veya Sadeleştirilmiş Terminal Konsolu
 
-Proje klasöründeki **`baslat_windows.bat`** dosyasına çift tıklayarak tüm işlemleri menüden yönetebilirsiniz:
+Artık karmaşık onlarca çalıştırma seçeneği yerine **2 ana seçenek** mevcuttur ve **her ikisi de aynı işlerin tamamını** yapabilmektedir:
+
+#### Seçenek A: 🖥️ Grafik Kullanıcı Arayüzü (Modern GUI — Önerilen)
+Evrak kataloğu, üç durumlu filtreler, önizleme, indirme, dava arşivleme, Drive eşitleme ve e-imza araçlarının tamamını tek pencerede sunar:
+- **Windows:** `UYAPEvrak.exe` veya `baslat_windows.bat` çalıştırıp `G` tuşlayın.
+- **Python:** `python uygulama.py` veya `python baslat.py --gui`
+
+#### Seçenek B: 💻 Sadeleştirilmiş Terminal / Konsol Arayüzü (CLI)
+Tüm yetenekleri 9 temiz kategoride toplayan, klavyeyle hızlı ve akıcı yönetilen interaktif konsol:
+- **Windows:** `baslat_windows.bat`
+- **Linux / macOS:** `./baslat.sh`
+- **Python / Termux:** `python baslat.py`
 
 ```text
-==================================================================
-   UYAP Avukat Portal Evrak Indirici - Windows 11
-==================================================================
+======================================================================
+       ⚖️  UYAP EVRAK YÖNETİCİSİ & HUKUK ASİSTANI (v3.0.0)
+       © 2026 Av. Can KIZILYAR — Tüm hakları saklıdır.
+======================================================================
+  [1] ⚡ İŞLEMLERİM İNDİRİCİ (Son 1 Yıl / Özel Tarih Aralığı)
+  [2] 📂 DAVA DOSYALARI (Tüm Evrak ve Ekleri İndir / Tür Filtreli)
+  [3] 🔍 EVRAK KATALOĞU (Tüm Portalı Hızlı Tara & İndeksle)
+  [4] ☁️  DAVA ARŞİVLEME & GOOGLE DRIVE EŞİTLEME (Otonom Senkron)
+  [5] 🔄 UDF / TIFF / ÇOKLU FORMAT -> PDF TOPLU DÖNÜŞTÜRÜCÜ
+  [6] ⏳ TEBLİGAT, SÜRE & DURUŞMA TAKVİMİ (.ics + CSV + Mazbata)
+  [7] ✍️  E-İMZA & OTURUM (ArkSigner Sessiz Giriş / Mobil İmza / İmzala)
+  [8] 🤖 UYAP NÖBETÇİ BOT (7/24 Arka Planda İzleme & Keep-Alive)
+  [9] ⚙️  AYARLAR & TARAYICI MODU (Gizli Headless / Görünür)
 
-  1) Islemlerim Indirici (Son 1 Yil - Hizli)
-  2) Islemlerim Indirici (Gecmis Yillar / Ozel Tarih Araligi)
-  3) Dava Dosyalarindan Belirli Evrak Indir (Durusma, Rapor, Karar vb.)
-  4) Dava Dosyalarindan TUM Evraklari ve EKLERI Indir (Toplu Arsiv)
-  5) Dava & Cevap Layihalari (Dava, Cevap, Bilirkisi Itiraz, Beyan)
-  6) Tebligat & Mazbatalar (Fiziki PTT + UETS - 5 Gün, 1-2 Hafta, 30-90 Gün Seçimli)
-  7) Durusma Takvimi Olustur (.ics / Google & Outlook Takvim + CSV)
-  8) Indirilen UDF'leri PDF'e Donustur (TrueType Embedded PDF)
-  9) Tebligat & Sure Analizi Calistir (tebligat_takip_listesi.csv)
- 10) Evrak Zenginlestirme & Akilli Isimlendirme (enrich_and_rename)
- 11) Chrome / Edge UYAP Oturumu Baslat (Port 9223)
-==================================================================
+  [G] 🖥️  GRAFİK KULLANICI ARAYÜZÜ (Modern GUI Aç)
+  [0] 🚪 Çıkış
+======================================================================
 ```
 
 ---
 
-### 4. Adım 3: Doğrudan Komut Satırı (PowerShell / CMD) Kullanımı
+### 4. Doğrudan Komut Satırı (PowerShell / Terminal) ile Çalıştırma
 
 Terminalden doğrudan hedefli görevler çalıştırmak için aşağıdaki komutları kullanabilirsiniz:
 
