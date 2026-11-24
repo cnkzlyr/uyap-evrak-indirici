@@ -176,6 +176,31 @@ def esitle(asama: str = "hepsi", limit: int = 50, dry_run: bool = False):
     rows = cur.execute(query).fetchall()
     logger.info(f"[*] Aşama '{asama}': İncelenen evrak sayısı: {len(rows)}")
 
+    # Yerel fiziksel dosyaların önbellek haritasını oluştur (/sdcard ve yerel kök)
+    logger.info("[*] Yerel dosya önbelleği taranıyor...")
+    file_cache = {}
+    scan_roots = [SDCARD_ARCHIVE_DIR, BASE_DIR / "UYAP_Indirilenler", BASE_DIR / r"G:\Drive'ım\UYAP_Arsiv"]
+    for sr in scan_roots:
+        if sr.exists():
+            for root, _, files in os.walk(sr):
+                for fn in files:
+                    fp = Path(root) / fn
+                    if fp.stat().st_size > 0:
+                        file_cache[fn] = fp
+    logger.info(f"[*] Yerelde {len(file_cache):,} tekil dosya tespit edildi.")
+
+    def resolve_local(p_str: str, pdf_str: str) -> Path | None:
+        for raw in [pdf_str, p_str]:
+            if not raw:
+                continue
+            p = Path(raw)
+            if p.exists() and p.stat().st_size > 0:
+                return p
+            fname = re.split(r'[\\/]', raw)[-1]
+            if fname and fname in file_cache:
+                return file_cache[fname]
+        return None
+
     aday_evraklar = []
     atlan_filtre = 0
     for r in rows:
@@ -196,11 +221,7 @@ def esitle(asama: str = "hepsi", limit: int = 50, dry_run: bool = False):
             continue
 
         # Yerel dosya mevcut mu?
-        local_target = None
-        if pdf_path and Path(pdf_path).exists():
-            local_target = Path(pdf_path)
-        elif path and Path(path).exists():
-            local_target = Path(path)
+        local_target = resolve_local(path, pdf_path)
 
         if local_target and local_target.stat().st_size > 0:
             aday_evraklar.append({

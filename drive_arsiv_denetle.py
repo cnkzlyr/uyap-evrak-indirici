@@ -296,4 +296,35 @@ def denetle():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Google Drive & UYAP Arşiv Kapsamlı Denetim ve Raporlama Motoru")
+    parser.add_argument("--ozet", action="store_true", help="Mevcut denetim raporunun özetini anında gösterir")
+    args = parser.parse_args()
+
+    if args.ozet and REPORT_JSON.exists():
+        try:
+            with open(REPORT_JSON, "r", encoding="utf-8") as f:
+                rep = json.load(f)
+            oz = rep.get("ozet", {})
+            print("=" * 65)
+            print("  MEVCUT ARŞİV VE GOOGLE DRIVE DENETİM RAPORU ÖZETİ")
+            print("=" * 65)
+            print(f"  • Rapor Tarihi                          : {oz.get('tarih', '-')}")
+            print(f"  • Katalogdaki Toplam Dava/İşlem Dosyası : {oz.get('katalog_toplam_dosya_sayisi', 0):,}")
+            print(f"  • Katalogdaki Toplam Evrak Kaydı       : {oz.get('katalog_toplam_evrak_sayisi', 0):,}")
+            print(f"  • Yerelde Taranan Fiziksel Dosya       : {oz.get('fiziksel_mevcut_dosya_sayisi', 0):,}")
+            print(f"  • Google Drive'da Yüklü Evrak          : {oz.get('google_drive_yuklu_evrak_sayisi', 0):,}")
+            print(f"  • Bozuk (0 Byte / Hatalı İçerik)        : {oz.get('bozuk_dosya_sayisi', 0)}")
+            print(f"  • Mükerrer (Duplicate SHA-256)         : {oz.get('mukerrer_dosya_sayisi', 0)}")
+            print(f"  • Adlandırma Standardına Uymayan       : {oz.get('adlandirma_uygunsuz_dosya_sayisi', 0)}")
+            print(f"  • Eksik / Henüz İndirilmemiş Evrak    : {oz.get('eksik_indirilecek_evrak_sayisi', 0):,}")
+            print("=" * 65)
+            print(f"[✓] Rapor JSON  : {REPORT_JSON}")
+            print(f"[✓] Mevcut CSV  : {REPORT_CSV_MEVCUT}")
+            print(f"[✓] Sorunlu CSV : {REPORT_CSV_SORUNLU}")
+            print(f"[✓] Eksik CSV   : {REPORT_CSV_EKSIK}")
+            sys.exit(0)
+        except Exception:
+            pass
+
     denetle()
