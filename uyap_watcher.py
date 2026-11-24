@@ -28,6 +28,18 @@ Kullanım:
 
 from __future__ import annotations
 
+# Android (Termux'suz): gömülü glibc ad çözümleyemez → bağımsız DNS çözücüyü bu süreçte de kur
+# (sitecustomize'a güvenmeden; v4.4.0'da nöbetçi "Temporary failure in name resolution" veriyordu)
+if __import__("os").environ.get("CANASISTAN_ANDROID") == "1":
+    try:
+        import sys as _s, pathlib as _p
+        _s.path.insert(0, str(_p.Path(__file__).resolve().parents[2]))
+        import dns_cozucu as _dns
+        _dns.yama_kur()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 import argparse
 import datetime as dt
 import json
@@ -38,7 +50,9 @@ import sys
 import time
 from pathlib import Path
 
-BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+# Betiğin KENDİ klasörü (masaüstünde kullanıcı klasörüne eşitlenmiş kopya). Eskiden paketli uygulamada sys._MEIPASS
+# (/usr/lib/CanEditor/.../_internal, SALT-OKUNUR) seçiliyordu: günlük açılamayıp görev anında çöküyordu (Fedora).
+BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("UYAP_VERI_DIZINI") or BASE_DIR)
 CONFIG_FILE = DATA_DIR / "watcher_config.json"
 LOG_DIR = DATA_DIR / "loglar"
@@ -64,6 +78,21 @@ import donusturucu as dn
 # ---------------------------------------------------------------------------
 # Telegram Bot İstemcisi (Sıfır ek kütüphane bağımlılığı)
 # ---------------------------------------------------------------------------
+
+def _kayitli_pin(ui) -> str:
+    """e-İmza PIN'i: uyap_indirici'nin yüklediği (pin dosyası / UYAP_E_IMZA_PIN), yoksa DATA_DIR/pin.txt."""
+    pin = getattr(ui, "DEFAULT_E_IMZA_PIN", "") or ""
+    if not pin:
+        for aday in (DATA_DIR / "pin.txt", BASE_DIR / "pin.txt", Path("pin.txt")):
+            try:
+                if aday.is_file():
+                    pin = aday.read_text(encoding="utf-8").strip()
+                    if pin:
+                        break
+            except OSError:
+                continue
+    return pin
+
 class TelegramClient:
     def __init__(self, bot_token: str = "", chat_id: str = ""):
         self.bot_token = bot_token.strip()
@@ -76,6 +105,18 @@ class TelegramClient:
     def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
         if not self.is_configured:
             return False
+        # v4.9.3: Telegram tek mesajda en çok 4096 karakter alır ("message is too long" 400 hatası):
+        # uzun özetler satır sınırından bölünüp sırayla gönderilir. EN: split at line boundaries (<= 3900 chars).
+        if len(text) > 3900:
+            parca, ok = "", True
+            for satir in text.split("\n"):
+                if len(parca) + len(satir) + 1 > 3900 and parca:
+                    ok = self.send_message(parca, parse_mode) and ok
+                    parca = ""
+                parca += satir[:3900] + "\n"
+            if parca.strip():
+                ok = self.send_message(parca, parse_mode) and ok
+            return ok
         import requests
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
@@ -129,8 +170,11 @@ def load_config() -> dict:
             cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
-    cfg.setdefault("telegram_token", os.environ.get("UYAP_TELEGRAM_TOKEN", ""))
-    cfg.setdefault("telegram_chat_id", os.environ.get("UYAP_TELEGRAM_CHAT_ID", ""))
+    # Boş string kayıtlı olsa bile ortamdan (arayüzde kaydedilen .env) doldur; eskiden setdefault boşu ezmiyordu
+    if not str(cfg.get("telegram_token") or "").strip():
+        cfg["telegram_token"] = os.environ.get("UYAP_TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not str(cfg.get("telegram_chat_id") or "").strip():
+        cfg["telegram_chat_id"] = os.environ.get("UYAP_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID", "")
     cfg.setdefault("interval_minutes", 15)
     cfg.setdefault("keepalive_minutes", 3)
     cfg.setdefault("google_drive_dir", "G:\\Drive'ım\\UYAP_Arsiv")
@@ -201,12 +245,26 @@ class UyapWatcher:
         )
         import uyap_indirici as ui
         self.is_termux = getattr(ui, "IS_TERMUX", False) or sys.platform != "win32"
-        gdrive_cfg = config.get("google_drive_dir", "")
+        gdrive_cfg = str(config.get("google_drive_dir") or "").strip()
+        fallback_dir = Path(os.environ.get("UYAP_INDIRME_DIZINI") or (DATA_DIR / "UYAP_Indirilenler"))
         if self.is_termux:
             sd_cand = Path("/sdcard/UYAP_Indirilenler")
-            self.download_dir = sd_cand if sd_cand.parent.exists() else DATA_DIR / "UYAP_Indirilenler"
+            self.download_dir = sd_cand if sd_cand.parent.exists() else fallback_dir
+        elif gdrive_cfg:
+            cand = Path(gdrive_cfg)
+            # Sürücü (ör. G:\) bağlı değilse çökme; yerel yedek klasöre düş
+            try:
+                if cand.exists() or cand.parent.exists() or (cand.anchor and Path(cand.anchor).exists()):
+                    cand.mkdir(parents=True, exist_ok=True)
+                    self.download_dir = cand
+                else:
+                    logger.warning("Google Drive klasörü erişilebilir değil (%s); yerel klasör kullanılıyor: %s", cand, fallback_dir)
+                    self.download_dir = fallback_dir
+            except OSError as e:
+                logger.warning("Google Drive klasörü oluşturulamadı (%s): %s; yerel klasör kullanılıyor: %s", cand, e, fallback_dir)
+                self.download_dir = fallback_dir
         else:
-            self.download_dir = Path(gdrive_cfg or os.environ.get("UYAP_INDIRME_DIZINI") or DATA_DIR / "UYAP_Indirilenler")
+            self.download_dir = fallback_dir
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.bridge = None
         self.motor = None
@@ -233,52 +291,12 @@ class UyapWatcher:
             if not self.bridge.is_logged_in():
                 logger.warning("⚠️ UYAP oturumu açık değil! Giriş doğrulanıyor...")
 
-                # 1. Android / Termux Ortamı
-                if getattr(ui, "IS_TERMUX", False):
-                    cfg_path = Path(".uyap_config.json")
-                    tc, gsm, op = "", "", "3"
-                    if cfg_path.exists():
-                        try:
-                            with open(cfg_path, "r", encoding="utf-8") as f:
-                                cdata = json.load(f)
-                                tc = cdata.get("tc", "")
-                                gsm = cdata.get("gsm", "")
-                                op = cdata.get("operator", "3")
-                        except Exception:
-                            pass
-
-                    if tc and gsm:
-                        logger.info("📲 Android/Termux: Mobil İmza ile giriş başlatılıyor (TC: %s, GSM: %s)...", tc, gsm)
-                        logger.info("🔔 Lütfen telefon ekranınıza gelecek olan SIM İmza Onayını (PIN) onaylayınız.")
-                        ok_m, msg_m = self.bridge.login_with_mobil_imza(tc=tc, gsm=gsm, operator=op, status_cb=logger.info)
-                        if not ok_m:
-                            logger.error("❌ Mobil İmza ile giriş başarısız: %s", msg_m)
-                            return False
-                    else:
-                        logger.error("❌ Termux'ta UYAP oturumu açık değil ve Mobil İmza ayarları (.uyap_config.json) bulunamadı.")
-                        logger.error("👉 Android'de USB e-İmza yerine Mobil İmza kullanılır. Lütfen .uyap_config.json içine tc ve gsm bilgilerinizi kaydedin.")
-                        return False
-
-                # 2. Windows / Masaüstü Ortamı (e-İmza)
-                else:
-                    pin = getattr(ui, "DEFAULT_E_IMZA_PIN", None)
-                    if not pin and os.path.exists("pin.txt"):
-                        try:
-                            with open("pin.txt", "r", encoding="utf-8") as f:
-                                pin = f.read().strip()
-                        except Exception:
-                            pass
-
-                    if pin:
-                        logger.info("🔑 e-İmza PIN ile otomatik UYAP oturumu açılıyor...")
-                        ok_re, msg_re = self.bridge.auto_relogin(pin=pin)
-                        if not ok_re:
-                            logger.warning("⚠️ e-İmza otomatik giriş başarısız: %s", msg_re)
-                            logger.warning("👉 Lütfen e-İmzanızın (USB token) takılı olduğunu ve ArkSigner'ın çalıştığını kontrol ediniz.")
-                            return False
-                    else:
-                        logger.warning("⚠️ e-İmza PIN'i (pin.txt) bulunamadı. Lütfen tarayıcıdan giriş yapınız.")
-                        return False
+                # Kart takılıysa e-İmza; takılı değilse ya da bağlantı koptuysa oturum açılana kadar
+                # Mobil İmza (.uyap_config.json: tc, gsm, operator). Bir tur en çok 30 dk dener; sonraki tur sürdürür.
+                ok_g, msg_g = self.bridge.akilli_oturum_ac(pin=_kayitli_pin(ui), status_cb=logger.info, sure_siniri_s=1800)
+                if not ok_g:
+                    logger.error("❌ UYAP oturumu açılamadı: %s", msg_g)
+                    return False
 
             # Son kontrol (sayfa yükleniyorsa 4 denemeyle doğrula)
             logged_in = False
@@ -297,8 +315,9 @@ class UyapWatcher:
             full_name = f"{usr.get('ad', '') or usr.get('adi', '')} {usr.get('soyad', '') or usr.get('soyadi', '')}".strip() or "Avukat"
             logger.info("✅ UYAP oturumu doğrulandı: Sayın %s", full_name)
 
-            relogin_fn = (lambda: self.bridge.auto_relogin(pin=ui.DEFAULT_E_IMZA_PIN)[0]) if getattr(ui, "DEFAULT_E_IMZA_PIN", None) else None
+            relogin_fn = lambda: self.bridge.akilli_oturum_ac(pin=_kayitli_pin(ui), status_cb=logger.info, sure_siniri_s=1800)[0]  # noqa: E731
             self.motor = ek.Motor(self.bridge, self.katalog, self.download_dir, log=logger.info, relogin=relogin_fn)
+            self.motor.kesme = self._kesme
             self.finans_mgr.bridge = self.bridge
             logger.info("UYAP tarayıcı köprüsüne başarıyla bağlandı (Port: %d).", self.bridge.port)
             return True
@@ -375,6 +394,7 @@ class UyapWatcher:
                 continue
 
             stats["processed_cases"] += 1
+            self._oncelik_isle()      # v4.9.3: açık dosya taraması sürerken gelen elle indirme istekleri bekletilmez
             logger.info("  [%d/%d] 📂 %s (%s)...", idx, total_cases, case["birim"], case["dosya_no"])
 
             try:
@@ -470,7 +490,7 @@ class UyapWatcher:
                                 pdf_path = Path(row_up["pdf_path"])
                                 if pdf_path.exists() and self.cloud and self.cloud.is_configured:
                                     rel_folder = f"DAVA_EVRAKLARI/{case['birim']}/{case['dosya_no']}"
-                                    self.cloud.upload_file(pdf_path, remote_folder_path=rel_folder)
+                                    self._drive_yukle(row["id"], pdf_path, rel_folder)
 
                         # Yasal süre hesabı
                         sure_bilgisi = calculate_legal_deadline(tur, acik)
@@ -499,17 +519,37 @@ class UyapWatcher:
                             else:
                                 self.tg.send_message(msg_text)
 
+                            # Otomatik Notion & TickTick aktarımı (CanEditor Hukuk Asistanı köprüsü)
+                            try:
+                                asistan_kok = BASE_DIR.parent.parent
+                                if str(asistan_kok) not in sys.path:
+                                    sys.path.insert(0, str(asistan_kok))
+                                import entegrasyon as _ent  # type: ignore
+                                avukat_dir = BASE_DIR.parent / "avukatasistan"
+                                if _ent.ayar_ozeti(avukat_dir).get("otomatik_senkron"):
+                                    _ent.uyap_otomatik_aktar(
+                                        avukat_dir,
+                                        birim=str(case["birim"] or ""),
+                                        dosya_no=str(case["dosya_no"] or ""),
+                                        tur=str(tur or ""),
+                                        aciklama=str(acik or ""),
+                                        tarih=str(tarih or ""),
+                                    )
+                            except Exception as ee:
+                                logger.debug("Otomatik Notion/TickTick aktarımı atlandı: %s", ee)
+
                         stats["new_downloaded"] += 1
 
                 # Taranma zamanını tazele
                 # Finans ve Safahat güncelle (yeni evrak düştüğünde anında mali durumu ve safahati tazele)
                 if truly_fresh:
                     try:
-                        is_icra = "İcra" in (case["birim"] or "") or "Icra" in (case["birim"] or "")
+                        from uyap_finans_safahat import icra_mi
+                        is_icra = icra_mi(case["birim"] or "", dict(case).get("dosya_tur") or "")
                         if is_icra:
                             self.finans_mgr.fetch_icra_hesap(dosya_id, dkey, case["birim"], case["dosya_no"])
                         else:
-                            self.finans_mgr.fetch_finans(dosya_id, dkey, case["birim"], case["dosya_no"])
+                            self.finans_mgr.fetch_finans(dosya_id, dkey, case["birim"], case["dosya_no"], is_icra=False)
                             self.finans_mgr.fetch_safahat(dosya_id, dkey, case["birim"], case["dosya_no"])
                     except Exception as fe:
                         logger.debug("Finans/safahat tazeleme hatası: %s", fe)
@@ -532,9 +572,21 @@ class UyapWatcher:
             # WAF'a takılmamak için nazik bekleme
             time.sleep(0.4)
 
-        # Google Drive varsa veritabanı anlık snapshot'ını güncelle
-        if drive_dir:
-            self.katalog.cloud_backup(drive_dir / "uyap_katalog_yedek.db")
+        # Google Drive varsa veritabanı anlık snapshot'ını güncelle ve Drive indeksini tazele
+        if drive_dir and drive_dir.is_dir():
+            try:
+                self.katalog.cloud_backup(drive_dir / "uyap_katalog_yedek.db")
+            except Exception as be:
+                logger.warning("Drive katalog yedeği yazılamadı: %s", be)
+            if self.config.get("drive_auto_index", True):
+                try:
+                    asistan_kok = BASE_DIR.parent.parent
+                    if str(asistan_kok) not in sys.path:
+                        sys.path.insert(0, str(asistan_kok))
+                    import drive_indeks as _di  # type: ignore
+                    _di.indeksle(DATA_DIR / "drive_indeks.db", drive_dir)
+                except Exception as ie:
+                    logger.debug("Drive indeksleme atlandı: %s", ie)
 
         stats["elapsed_seconds"] = round(time.time() - start_time, 1)
         mins = int(stats["elapsed_seconds"] // 60)
@@ -575,7 +627,25 @@ class UyapWatcher:
             ).replace(",", ".")
             self.tg.send_message(tg_report)
 
+        self._durum_yaz(stats, drive_dir)
         return stats
+
+    def _durum_yaz(self, stats: dict, drive_dir) -> None:
+        """Son tur özeti: CanEditor Asistan paneli (Drive / Nöbetçi durumu) bu dosyayı okur."""
+        try:
+            durum = {
+                "bitis": dt.datetime.now().isoformat(timespec="seconds"),
+                "sonraki_dk": self.config.get("interval_minutes", 15),
+                "istatistik": stats,
+                "drive_dizini": str(drive_dir) if drive_dir else "",
+                "drive_webhook": bool(self.config.get("google_drive_webhook")),
+                "indirme_dizini": str(self.download_dir),
+            }
+            gecici = DATA_DIR / "watcher_durum.json.tmp"
+            gecici.write_text(json.dumps(durum, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(gecici, DATA_DIR / "watcher_durum.json")
+        except Exception as e:  # durum yazılamaması taramayı bozmaz
+            logger.debug("watcher_durum.json yazılamadı: %s", e)
 
     def check_upcoming_hearings(self) -> None:
         """Önümüzdeki 7 günün duruşmalarını çeker, yaklaşanları Telegram'dan bildirir."""
@@ -636,9 +706,14 @@ class UyapWatcher:
         sql = """
         SELECT e.id
         FROM evrak e
-        WHERE e.durum NOT IN ('indirildi', 'mukerrer')
+        WHERE e.durum NOT IN ('indirildi', 'mukerrer', 'yok')
           AND (e.pdf_path IS NULL OR e.pdf_path = '')
         ORDER BY 
+            -- Daha önce hata veren evraklar en sona: aynı bozuk 50 evrak sonsuza dek tekrar denenmesin
+            CASE WHEN e.durum = 'hata' THEN 1 ELSE 0 END ASC,
+            -- v4.9.3: önce ASIL evraklar, ekler sonra. Ekler çoğunlukla başka evrakın kopyası (ör. Temyiz Formu'nun
+            -- "Gerekçeli Karar" eki): logdaki pakette 50 evrağın 44'ü indirilip mükerrer çıkarak boşa gidiyordu.
+            e.is_ek ASC,
             CASE 
                 WHEN e.kategori IN ('karar') THEN 1
                 WHEN e.kategori IN ('durusma', 'tensip') THEN 2
@@ -658,6 +733,24 @@ class UyapWatcher:
 
     def get_missing_doc_ids(self, limit: int = 100) -> list[int]:
         """Varsa GUI filtrelerini (.katalog_filtre.json) okur; yoksa doğrudan HUKUKİ ÖNEM sırasına göre ID'leri döner."""
+        # Arayüzden "evraklarını Drive'a indir" denen dosyalar her şeyden önce
+        onc = self._oncelikli_dkeyler()
+        if onc:
+            try:
+                ph = ",".join("?" * len(onc))
+                ids = [r[0] for r in self.katalog.db.execute(
+                    f"SELECT id FROM evrak WHERE dkey IN ({ph}) AND durum NOT IN ('indirildi','mukerrer','yok','hata') "
+                    "AND (pdf_path IS NULL OR pdf_path='') ORDER BY tarih DESC LIMIT ?", (*onc, limit)).fetchall()]
+                bitmis = [d for d in onc if not self.katalog.db.execute(
+                    "SELECT 1 FROM evrak WHERE dkey=? AND durum NOT IN ('indirildi','mukerrer','yok','hata') "
+                    "AND (pdf_path IS NULL OR pdf_path='') LIMIT 1", (d,)).fetchone()
+                    and (self.katalog.db.execute("SELECT tarama FROM dosya WHERE dkey=?", (d,)).fetchone() or [""])[0] == "tamam"]
+                for d in bitmis:
+                    self._oncelik_birak(d)
+                if ids:
+                    return ids
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Öncelikli dosyalar okunamadı: %s", e)
         filter_file = DATA_DIR / ".katalog_filtre.json"
         filt = {}
         if filter_file.exists():
@@ -699,10 +792,13 @@ class UyapWatcher:
         if not self.bridge:
             return 0
         if not self.motor:
-            relogin_fn = (lambda: self.bridge.auto_relogin(pin=ui.DEFAULT_E_IMZA_PIN)[0]) if getattr(ui, "DEFAULT_E_IMZA_PIN", None) else None
+            import uyap_indirici as ui
+            relogin_fn = lambda: self.bridge.akilli_oturum_ac(pin=_kayitli_pin(ui), status_cb=logger.info, sure_siniri_s=1800)[0]  # noqa: E731
             self.motor = ek.Motor(self.bridge, self.katalog, self.download_dir, log=logger.info, relogin=relogin_fn)
+            self.motor.kesme = self._kesme
 
         target_ids = self.get_missing_doc_ids(limit=max_batch)
+        self._son_paket_dolu = len(target_ids) >= max_batch
         if not target_ids:
             logger.info("✨ Tüm evraklar güncel! İndirilmeyi bekleyen eksik evrak bulunamadı.")
             return 0
@@ -712,19 +808,24 @@ class UyapWatcher:
         downloaded = stats.get("indirildi", 0) + stats.get("onbellek", 0)
         mukerrer = stats.get("mukerrer", 0)
 
-        # Google Drive bulut eşitlemesi (Telefon / Termux / Webhook / Yerel Klasör)
-        if self.cloud and self.cloud.is_configured:
-            for eid in target_ids:
-                row_up = self.katalog.get(eid)
-                if row_up and row_up.get("pdf_path"):
-                    p = Path(row_up["pdf_path"])
-                    if p.exists():
-                        rel_folder = f"DAVA_EVRAKLARI/{row_up.get('birim', 'Diger')}/{row_up.get('dosya_no', 'Genel')}"
-                        self.cloud.upload_file(p, remote_folder_path=rel_folder)
+        self._buluta_yukle(target_ids)
 
         logger.info("✅ Eksik Evrak Tamamlama Bitti: %d indirildi, %d mükerrer, %d hata.",
                     downloaded, mukerrer, stats.get("hata", 0))
         return downloaded
+
+    def _buluta_yukle(self, target_ids) -> None:
+        """Google Drive bulut eşitlemesi (Telefon / Termux / Webhook / Yerel Klasör)."""
+        if self.cloud and self.cloud.is_configured:
+            for eid in target_ids:
+                _r = self.katalog.get(eid)
+                # sqlite3.Row .get() desteklemez → dict'e çevir (v4.1 nöbetçi döngü çökmesi)
+                row_up = dict(_r) if _r is not None else None
+                if row_up and row_up.get("pdf_path"):
+                    p = Path(row_up["pdf_path"])
+                    if p.exists():
+                        rel_folder = f"DAVA_EVRAKLARI/{row_up.get('birim', 'Diger')}/{row_up.get('dosya_no', 'Genel')}"
+                        self._drive_yukle(eid, p, rel_folder)
 
     def sync_intel_and_deadlines(self, force: bool = False) -> None:
         """Süreleri, duruşmaları, ara kararları ve portal işlemlerini günceller; Telegram alarmı gönderir."""
@@ -747,8 +848,287 @@ class UyapWatcher:
         except Exception as e:
             logger.warning("İstihbarat ve süre senkronizasyon hatası: %s", e)
 
-    def run_loop(self, once: bool = False) -> None:
-        """Sürekli arka plan nöbet döngüsü veya tek seferlik tarama (--once)."""
+    def _drive_yukle(self, evrak_id, yol: Path, rel_folder: str) -> None:
+        """Evrakı Drive'a bir kez yükler: drive_indeks.db/drive_yukleme defterinde olanı atlar, başarılıyı yazar.
+        (Arayüzdeki 'Drive'a Yüklenen X / Y' sayacı ve 'Eksikleri Eşitle' aynı defteri kullanır.)"""
+        import sqlite3
+        defter = DATA_DIR / "drive_indeks.db"
+        try:
+            c = sqlite3.connect(str(defter), timeout=15)
+            c.execute("CREATE TABLE IF NOT EXISTS drive_yukleme (evrak_id TEXT PRIMARY KEY, boyut INTEGER NOT NULL DEFAULT 0,"
+                      " hedef TEXT NOT NULL DEFAULT '', drive_id TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',"
+                      " zaman TEXT NOT NULL DEFAULT '')")
+            if c.execute("SELECT 1 FROM drive_yukleme WHERE evrak_id=?", (str(evrak_id),)).fetchone():
+                c.close()
+                return
+        except sqlite3.DatabaseError as e:
+            logger.warning("Drive defteri açılamadı: %s", e)
+            c = None
+        sonuc = self.cloud.upload_file(yol, remote_folder_path=rel_folder) or {}
+        if c is not None and sonuc.get("status") == "success":
+            c.execute("INSERT OR REPLACE INTO drive_yukleme VALUES (?,?,?,?,?,?)",
+                      (str(evrak_id), Path(yol).stat().st_size, f"{rel_folder}/{Path(yol).name}", str(sonuc.get("fileId") or ""),
+                       str(sonuc.get("url") or sonuc.get("path") or ""), time.strftime("%Y-%m-%dT%H:%M:%S")))
+            c.commit()
+        if c is not None:
+            c.close()
+
+    def _oncelikli_dkeyler(self) -> list:
+        """Arayüzdeki "Bu dosyayı getir / evraklarını Drive'a indir" düğmeleriyle öne alınan dosyalar."""
+        try:
+            v = json.loads((DATA_DIR / "oncelikli_dosyalar.json").read_text(encoding="utf-8"))
+            return [str(x) for x in (v.get("dkeyler") or [])] if isinstance(v, dict) else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    # ------------------------------------------------------------------ v4.9.3 ÖNCELİK KUYRUĞU
+    # Arayüzde elle "indir" denen dosya/evraklar (sunucu: oncelik_ekle → oncelikli_dosyalar.json). Senkron bunu
+    # HER evrak arasında ve her adımdan önce yoklar; o an ne yapıyorsa bırakıp önce bunları indirir, PDF'e çevirir
+    # ve Drive'a eşitler. EN: user-requested downloads pre-empt the archive backlog within ~1-2 seconds.
+    def _oncelik_oku(self) -> tuple[list, list]:
+        try:
+            v = json.loads((DATA_DIR / "oncelikli_dosyalar.json").read_text(encoding="utf-8"))
+            if isinstance(v, dict):
+                self._oncelik_kat = [str(x) for x in v.get("kategoriler") or []]
+                return [str(x) for x in v.get("dkeyler") or []], [str(x) for x in v.get("skeyler") or []]
+        except Exception:  # noqa: BLE001
+            pass
+        self._oncelik_kat = []
+        return [], []
+
+    def _oncelik_var(self) -> bool:
+        dk, sk = self._oncelik_oku()
+        if not (dk or sk or self._oncelik_kat):
+            return False
+        # İşi bitmiş (listesi alınmış, bekleyen evrakı kalmamış) kayıtlar kesmeye yol açmasın
+        return bool(self._oncelik_idleri(dk, sk, sinir=1)) or any(not self._tarama_tamam(d) for d in dk)
+
+    def _kesme(self) -> bool:
+        return not getattr(self, "_oncelikte", False) and self._oncelik_var()
+
+    def _tarama_tamam(self, dkey: str) -> bool:
+        r = self.katalog.db.execute("SELECT tarama FROM dosya WHERE dkey=?", (dkey,)).fetchone()
+        t = (r[0] if r else "") or ""
+        return t == "tamam" or t.startswith("hata")
+
+    def _oncelik_idleri(self, dk: list, sk: list, sinir: int = 5000, kategoriler=None) -> list:
+        """Öncelikli bekleyen evraklar: önce elle seçilen dosya/evraklar, sonra toplu kategori isteği
+        (ör. "UYAP: tebligat evraklarını indir" → katalogdaki tüm tebligat/mazbatalar)."""
+        kat = getattr(self, "_oncelik_kat", []) if kategoriler is None else kategoriler
+        kosul, param, el = [], [], []
+        if dk:
+            el.append(f"dkey IN ({','.join('?' * len(dk))})")
+            param += dk
+        if sk:
+            el.append(f"skey IN ({','.join('?' * len(sk[:900]))})")
+            param += sk[:900]
+        kosul += el
+        if "tebligat" in kat:
+            kosul.append("(kategori='tebligat' OR lower(COALESCE(ara,'')) LIKE '%teblig%' OR lower(COALESCE(ara,'')) LIKE '%mazbata%')")
+        if not kosul:
+            return []
+        sira = f"CASE WHEN {' OR '.join(el)} THEN 0 ELSE 1 END, " if el else ""
+        return [r[0] for r in self.katalog.db.execute(
+            f"SELECT id FROM evrak WHERE ({' OR '.join(kosul)}) AND durum NOT IN ('indirildi','mukerrer','yok','hata') "
+            f"AND (pdf_path IS NULL OR pdf_path='') ORDER BY {sira}is_ek ASC, tarih DESC LIMIT ?",
+            (*param, *(param if el else []), sinir)).fetchall()]
+
+    def _oncelik_temizle(self, bitmis_dk: list, bitmis_sk: list) -> None:
+        p = DATA_DIR / "oncelikli_dosyalar.json"
+        try:
+            v = json.loads(p.read_text(encoding="utf-8"))
+            v["dkeyler"] = [x for x in v.get("dkeyler") or [] if x not in bitmis_dk]
+            v["skeyler"] = [x for x in v.get("skeyler") or [] if x not in set(bitmis_sk)]
+            if v.get("kategoriler") and not self._oncelik_idleri([], [], sinir=1, kategoriler=v["kategoriler"]):
+                v["kategoriler"] = []
+            gecici = p.with_suffix(".watcher.tmp")
+            gecici.write_text(json.dumps(v, ensure_ascii=False), encoding="utf-8")
+            os.replace(gecici, p)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _oncelik_isle(self) -> int:
+        """Öncelikli kuyruğu boşalana kadar işler. Döner: indirilen evrak sayısı."""
+        if getattr(self, "_oncelikte", False) or not self.bridge or not self._oncelik_var():
+            return 0
+        if not self.motor:
+            import uyap_indirici as ui
+            relogin_fn = lambda: self.bridge.akilli_oturum_ac(pin=_kayitli_pin(ui), status_cb=logger.info, sure_siniri_s=1800)[0]  # noqa: E731
+            self.motor = ek.Motor(self.bridge, self.katalog, self.download_dir, log=logger.info, relogin=relogin_fn)
+            self.motor.kesme = self._kesme
+        self._oncelikte = True
+        toplam = 0
+        try:
+            ilerlemesiz = 0
+            while ilerlemesiz < 3:
+                dk, sk = self._oncelik_oku()
+                if not (dk or sk or self._oncelik_kat):
+                    break
+                # Elle istenen dosyanın listesi (eskiden hata verdiyse de) bu çalışmada bir kez yeniden alınır
+                denendi = self.__dict__.setdefault("_liste_denendi", set())
+                listesiz = [d for d in dk if d not in denendi and (self.katalog.db.execute(
+                    "SELECT COALESCE(tarama,'') FROM dosya WHERE dkey=?", (d,)).fetchone() or [""])[0] != "tamam"]
+                denendi.update(listesiz)
+                if listesiz:
+                    logger.info("⚡ Öncelikli: %d dosyanın evrak listesi alınıyor...", len(listesiz))
+                    self.motor.scan(include_closed=True, only_dkeys=set(listesiz))
+                    for d in listesiz:     # UYAP listede vermediyse sonsuza dek beklenmesin
+                        if not self._tarama_tamam(d):
+                            with self.katalog.db:
+                                self.katalog.db.execute("UPDATE dosya SET tarama='hata: öncelikli liste alınamadı' "
+                                                        "WHERE dkey=? AND COALESCE(tarama,'')<>'tamam'", (d,))
+                # 100'lük parçalar: büyük toplu istek (binlerce tebligat) sürerken yeni gelen tek dosya isteği araya girer
+                ids = self._oncelik_idleri(dk, sk, sinir=100)
+                if ids:
+                    logger.info("⚡ Öncelikli indirme: %d evrak indiriliyor ve Drive'a eşitleniyor (%s)...", len(ids),
+                                ", ".join(dk[:3]) or f"{len(sk)} seçili evrak")
+                    st = self.motor.download(ids, tahmin=False)
+                    self._buluta_yukle(ids)
+                    n = st.get("indirildi", 0) + st.get("onbellek", 0)
+                    toplam += n
+                    ilerlemesiz = 0 if (n or st.get("mukerrer") or st.get("hata") or st.get("yok")) else ilerlemesiz + 1
+                    logger.info("⚡ Öncelikli indirme bitti: %d indirildi, %d mükerrer (aynısı zaten var), %d hata.",
+                                n, st.get("mukerrer", 0), st.get("hata", 0) + st.get("yok", 0))
+                kalan = set(self._oncelik_idleri(dk, sk, kategoriler=[]))
+                bitmis_dk = [d for d in dk if self._tarama_tamam(d) and not self._oncelik_idleri([d], [], sinir=1, kategoriler=[])]
+                bitmis_sk = [x for x in sk if not self.katalog.db.execute(
+                    "SELECT 1 FROM evrak WHERE skey=? AND id IN (%s)" % (",".join(map(str, kalan)) or "0"), (x,)).fetchone()]
+                self._oncelik_temizle(bitmis_dk, bitmis_sk)
+                if not ids and not listesiz:
+                    break
+        except Exception as e:  # noqa: BLE001
+            logger.warning("⚡ Öncelikli indirme hatası: %s", e)
+        finally:
+            self._oncelikte = False
+        return toplam
+
+    def _bekle(self, sn: float) -> None:
+        """Uzun beklemeler öncelikli istek gelince hemen biter."""
+        son = time.time() + sn
+        while time.time() < son:
+            if self._oncelik_var():
+                self._oncelik_isle()
+                return
+            time.sleep(min(2.0, max(0.0, son - time.time())))
+
+    def _oncelik_birak(self, dkey: str) -> None:
+        try:
+            p = DATA_DIR / "oncelikli_dosyalar.json"
+            v = json.loads(p.read_text(encoding="utf-8"))
+            v["dkeyler"] = [x for x in v.get("dkeyler") or [] if x != dkey]
+            p.write_text(json.dumps(v, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _arsiv_katalogla(self, adet: int = 40) -> None:
+        """Tüm UYAP arşivinin (kapalı dosyalar dahil) evrak LİSTESİNİ kataloğa çıkarır.
+
+        v4.9: Eskiden aday sırası her turda aynıydı; UYAP'ın kalıcı hata verdiği (ör. vekâlet kaydı olmayan kapalı)
+        dosyalar listenin başında kalıp her turu tüketiyor, arşivin geri kalanı HİÇ listelenmiyordu (732 dosyadan 3'ü).
+        Artık: hiç denenmemiş dosyalar önce, kalıcı hatalılar 14 gün, geçici hatalılar 2 saat beklemeye alınır;
+        her denemenin zamanı 'taranma'da tutulur. Ayrıca tüm dosyaların oturum kimlikleri (dosya_id) tazelenir
+        ve tarafı boş dosyaların taraf listesi hızlıca tamamlanır."""
+        try:
+            if getattr(self, "motor", None) is None or getattr(self, "bridge", None) is None:
+                return
+            cases = self.bridge.query_tum_dosyalar(include_closed=True) or []
+            if not cases:
+                return
+            db = self.katalog.db
+            bilinen = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in db.execute(
+                "SELECT dkey, tarama, taranma, taraflar FROM dosya").fetchall()}
+            simdi = dt.datetime.now()
+            esik14 = (simdi - dt.timedelta(days=14)).isoformat(timespec="seconds")
+            esik2s = (simdi - dt.timedelta(hours=2)).isoformat(timespec="seconds")
+            onc = self._oncelikli_dkeyler()
+            # Oturum kimliklerini tazele (hesap/safahat/önizleme eski kimlikle başarısız oluyordu)
+            try:
+                with db:
+                    db.executemany("UPDATE dosya SET dosya_id=? WHERE dkey=? AND COALESCE(dosya_id,'')<>?",
+                                   [(str(c.get("dosyaId") or c.get("dosyaID") or ""), self.motor._case_dkey(c),
+                                     str(c.get("dosyaId") or c.get("dosyaID") or "")) for c in cases
+                                    if c.get("dosyaId") or c.get("dosyaID")])
+            except Exception:  # noqa: BLE001
+                pass
+            gruplar = {0: [], 1: [], 2: [], 3: []}
+            for c in cases:
+                dkey = self.motor._case_dkey(c)
+                tarama, taranma, _t = bilinen.get(dkey, ("", "", ""))
+                if dkey in onc and tarama != "tamam":
+                    gruplar[0].append(dkey)
+                elif dkey not in bilinen or not tarama:
+                    gruplar[1].append(dkey)
+                elif tarama == "tamam":
+                    if taranma and taranma < esik14:
+                        gruplar[3].append(dkey)
+                elif tarama.startswith("hata"):
+                    gecici = any(k in tarama for k in ("oturum", "yanıt", "ag"))
+                    if (not taranma) or taranma < (esik2s if gecici else esik14):
+                        gruplar[2].append(dkey)
+            adaylar = gruplar[0] + gruplar[1] + gruplar[2] + gruplar[3]
+            self._katalog_kalan = len(gruplar[0]) + len(gruplar[1]) + len(gruplar[2])
+            if adaylar:
+                secilen = set(adaylar[:adet])
+                logger.info("🗂️ Arşiv kataloğu: %d dosyanın evrak listesi alınıyor (sırada %d / toplam %d dosya)...",
+                            len(secilen), len(adaylar), len(cases))
+                self.motor.scan(include_closed=True, only_dkeys=secilen)
+                try:
+                    with db:
+                        db.execute("UPDATE dosya SET taranma=? WHERE dkey IN (%s)" % ",".join("?" * len(secilen)),
+                                   (simdi.isoformat(timespec="seconds"), *secilen))
+                except Exception:  # noqa: BLE001
+                    pass
+            self._taraf_tamamla(cases)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Arşiv kataloğu atlandı: %s", e)
+
+    def _taraf_tamamla(self, cases: list, adet: int = 120) -> None:
+        """Tarafı boş dosyaların taraf listesini UYAP'tan çeker (evrak listesinden çok daha hızlı):
+        Dosyalar ekranı, Evrak Ara'da taraf adıyla arama ve müvekkil tespiti bütün arşivde çalışsın."""
+        try:
+            bos = {r[0] for r in self.katalog.db.execute(
+                "SELECT dkey FROM dosya WHERE COALESCE(taraflar,'')=''").fetchall()}
+            mevcut = {r[0] for r in self.katalog.db.execute("SELECT dkey FROM dosya").fetchall()}
+            hedef = [c for c in cases if self.motor._case_dkey(c) in bos or self.motor._case_dkey(c) not in mevcut][:adet]
+            if not hedef:
+                return
+            from uyap_indirici import infer_yargi_kategorisi
+            avukat = getattr(self, "_avukat_adi", "") or ""
+            yazilan = 0
+            for i in range(0, len(hedef), 6):
+                parca = hedef[i:i + 6]
+                res = self.motor._taraflar_batch([str(c.get("dosyaId") or c.get("dosyaID") or "") for c in parca])
+                if not avukat:
+                    avukat = self.motor._avukat_adi([v for v in res.values() if v]) or ""
+                    self._avukat_adi = avukat
+                for c in parca:
+                    v = res.get(str(c.get("dosyaId") or c.get("dosyaID") or ""))
+                    self.katalog.upsert_dosya(c, v if v else None, avukat,
+                                              infer_yargi_kategorisi(str(c.get("birimAdi") or "")), "")
+                    yazilan += 1 if v else 0
+                self.katalog.db.commit()
+            if yazilan:
+                logger.info("👥 %d dosyanın tarafları kataloğa yazıldı (kalan %d).", yazilan, max(0, len(bos) - yazilan))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Taraf tamamlama atlandı: %s", e)
+
+    def _hesap_tazele(self) -> None:
+        """Boşta: hesabı hiç çekilmemiş / 24 saatten eski dosyaların UYAP hesaplarını (icra kapak hesabı, tahsilat,
+        reddiyat, harçlar, artan avans) azar azar tazeler. Böylece Dosya Hesapları ekranı hep gerçek veriyi gösterir."""
+        try:
+            if getattr(self, "bridge", None) is None:
+                return
+            self.finans_mgr.bridge = self.bridge
+            d = self.finans_mgr.hesaplari_tazele(limit=25)
+            if d.get("basarili"):
+                logger.info("💰 %d dosyanın UYAP hesabı tazelendi (%d icra).", d["basarili"], d.get("icra", 0))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Hesap tazeleme atlandı: %s", e)
+
+    def run_loop(self, once: bool = False) -> int:
+        """Sürekli arka plan nöbet döngüsü veya tek seferlik tarama (--once).
+        Dönüş: 0 başarılı, 1 hata (--once modunda çıkış kodu olur; böylece arayüz hatayı 'başarılı' sanmaz)."""
+        hata_kodu = 0
         logger.info("=" * 65)
         logger.info("  UYAP Nöbetçi Bot Devrede")
         logger.info("  Döngü Aralığı: %d dakika", self.config.get("interval_minutes", 15))
@@ -769,29 +1149,64 @@ class UyapWatcher:
                     if not self.connect_bridge():
                         logger.warning("UYAP bağlantısı kurulamadı. 60 sn sonra tekrar denenecek.")
                         if once:
+                            hata_kodu = 1
                             break
                         time.sleep(60)
                         continue
 
                 # 1. Oturum nabzı
                 self.heartbeat()
+                # 1b. v4.9.3: elle "indir" denenler her şeyden önce
+                self._oncelik_isle()
+
+                # Sürekli akışta (once=False) açık dosya taraması / duruşma / süre analizi her pakette değil,
+                # interval_minutes'te bir yapılır; aradaki zamanın tamamı arşiv indirmeye (UYAP → Drive) ayrılır.
+                tam_tur = once or (time.time() - getattr(self, "_son_tam_tur", 0.0) >= interval_s)
+                if tam_tur:
+                    self._son_tam_tur = time.time()
 
                 # 2. V.I.P. ŞERİT: Derdest açık dosyaların evrak kontrolü (Yeni evrak anında yakalanır, indirilir ve Drive'a aktarılır)
-                if self.config.get("check_open_cases", True):
+                if tam_tur and self.config.get("check_open_cases", True):
                     stats = self.scan_open_cases()
                     yeni_sayisi = stats.get("new_downloaded", 0) if isinstance(stats, dict) else stats
                     if yeni_sayisi > 0:
                         logger.info("🔔 V.I.P. Nöbetçi: %d adet taze evrak yakalandı ve Google Drive'a yüklendi!", yeni_sayisi)
 
+                # 2b. TÜM ARŞİVİN KATALOĞU: kapalı dosyalar dahil her dosyanın evrak LİSTESİ (indirmeden) kataloğa
+                # işlenir; Evrak Ara bütün UYAP evrakında arar, arşiv eşitleme şeridi de bütün arşivi görür.
+                # Her turda en çok 60 dosya (UYAP'ı yormadan); 731 dosya ~3 saatte tamamlanır, sonra 14 günde bir tazelenir.
+                # v4.9.3 ZAMAN BÜTÇESİ: indirme bekleyen evrak varken katalog listeleme 90 sn'de bir değil 6 dk'da bir,
+                # hesap tazeleme 5 dk'da bir değil 30 dk'da bir yapılır. Eskiden 15 dakikanın ~1,5 dakikası indirmeye
+                # kalıyordu (logda 15:25-15:40 arası tek paket: 6 evrak) ve Drive'a "bir türlü aktarmıyor" görünüyordu.
+                bekleyen_var = bool(getattr(self, "_bekleyen_var", True))
+                self._oncelik_isle()
+                if tam_tur or time.time() - getattr(self, "_son_katalog", 0.0) >= (360 if bekleyen_var else 90):
+                    self._son_katalog = time.time()
+                    self._arsiv_katalogla(adet=40)
+                # Hesaplar (icra kapak hesabı, tahsilat/reddiyat, safahat) arşiv indirmesi sürerken de tazelenir;
+                # eskiden yalnızca arşiv Drive ile eşitken çalıştığı için hiç çekilmiyordu.
+                if time.time() - getattr(self, "_son_hesap", 0.0) >= (1800 if bekleyen_var else 300):
+                    self._son_hesap = time.time()
+                    self._hesap_tazele()
+
                 # 3. Duruşma kontrolü (Önümüzdeki 7 gün)
-                self.check_upcoming_hearings()
+                if tam_tur:
+                    self.check_upcoming_hearings()
 
                 # 4. Canlı Duruşma, Yasal Süre, Ara Karar ve Portal İşlemlerim Analizi
-                self.sync_intel_and_deadlines(force=once)
+                if tam_tur:
+                    self.sync_intel_and_deadlines(force=once)
 
                 # 5. ARŞİV EŞİTLEME ŞERİDİ: Kalan 506 bin evrakı kesin HUKUKİ ÖNEM sırasına göre Google Drive'a pompala
+                # v4.9.3: tek paket yerine ~4 dakika boyunca art arda paketler indirilir (diğer işler araya girmez)
                 if self.config.get("auto_download_missing", True):
-                    eksikler = self.reconcile_missing_docs(max_batch=50)
+                    pas_bas, eksikler = time.time(), 0
+                    while time.time() - pas_bas < 240:
+                        eksikler += self._oncelik_isle()
+                        n = self.reconcile_missing_docs(max_batch=100)
+                        eksikler += n
+                        if not getattr(self, "_son_paket_dolu", False):
+                            break
                     if eksikler > 0:
                         logger.info("📦 Öncelikli Arşiv Eşitleme: %d evrak Google Drive'a aktarıldı.", eksikler)
 
@@ -801,25 +1216,54 @@ class UyapWatcher:
 
                 # Kalan arşiv evrak kontrolü
                 cur_rem = self.katalog.db.execute(
-                    "SELECT COUNT(*) FROM evrak WHERE durum NOT IN ('indirildi', 'mukerrer') AND (pdf_path IS NULL OR pdf_path = '')"
+                    "SELECT COUNT(*) FROM evrak WHERE durum NOT IN ('indirildi', 'mukerrer', 'yok', 'hata') AND (pdf_path IS NULL OR pdf_path = '')"
                 )
                 kalan_evrak = cur_rem.fetchone()[0]
+                self._bekleyen_var = kalan_evrak > 0
 
                 if kalan_evrak > 0:
                     logger.info("⏳ UYAP Arşiv Eşitlemesi Devam Ediyor: Kalan %d evrak önem sırasıyla indiriliyor (Sonraki paket 3 sn)...", kalan_evrak)
-                    time.sleep(3.0)
+                    self._bekle(3.0)
+                elif time.time() - self._son_tam_tur < interval_s:
+                    # Arşiv bitti: bir sonraki açık dosya taramasına kadar bekle (ama tam aralığı tekrar saymadan)
+                    if getattr(self, "motor", None) and hasattr(self.motor, "tahminleri_dogrula"):
+                        try:
+                            d = self.motor.tahminleri_dogrula(limit=5)
+                            if d.get("dogrulanan"):
+                                logger.info("🔎 %d tahmini mükerrer doğrulandı (%d gerçekten farklıydı ve indirildi).",
+                                            d["dogrulanan"], d.get("indirildi", 0))
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("Tahmin doğrulama atlandı: %s", e)
+                    self._hesap_tazele()
+                    logger.info("✨ Arşiv Google Drive ile eşit. Bir sonraki açık dosya taraması %d dk içinde.",
+                                max(1, int((interval_s - (time.time() - self._son_tam_tur)) / 60)))
+                    self._bekle(max(30.0, min(300.0, interval_s - (time.time() - self._son_tam_tur))))
                 else:
+                    # Boştayken birkaç "tahmini mükerrer"i gerçekten indirip doğrula (yanlış tahmin kalmasın)
+                    if getattr(self, "motor", None) and hasattr(self.motor, "tahminleri_dogrula"):
+                        try:
+                            d = self.motor.tahminleri_dogrula(limit=5)
+                            if d.get("dogrulanan"):
+                                logger.info("🔎 %d tahmini mükerrer doğrulandı (%d gerçekten farklıydı ve indirildi).",
+                                            d["dogrulanan"], d.get("indirildi", 0))
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("Tahmin doğrulama atlandı: %s", e)
+                    self._hesap_tazele()
                     logger.info("✨ Tüm UYAP arşivi Google Drive ile %100 eşitlendi! Tam Nöbetçi Bekleme Modu (%d dakika)...", self.config.get("interval_minutes", 15))
-                    time.sleep(interval_s)
+                    if once:
+                        break
+                    self._bekle(interval_s)
 
             except KeyboardInterrupt:
                 logger.info("Nöbetçi kullanıcı tarafından durduruldu.")
                 break
             except Exception as e:
-                logger.error("Nöbetçi döngü hatası: %s", e)
+                logger.exception("Nöbetçi döngü hatası: %s", e)
                 if once:
+                    hata_kodu = 1
                     break
                 time.sleep(10)
+        return hata_kodu
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +1348,7 @@ def main():
         return
 
     watcher = UyapWatcher(cfg)
-    watcher.run_loop(once=args.once)
+    sys.exit(watcher.run_loop(once=args.once))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,17 @@ Temel Yetenekler ve Güvenlik Önlemleri:
    - Seri (tek tek) indirme, rastgele jitter beklemesi (3.5 - 7.0 sn) ve N dosyada dinlenme molası.
 """
 
+# Android (Termux'suz): gömülü glibc ad çözümleyemez → bağımsız DNS çözücüyü bu süreçte de kur
+# (sitecustomize'a güvenmeden; v4.4.0'da nöbetçi "Temporary failure in name resolution" veriyordu)
+if __import__("os").environ.get("CANASISTAN_ANDROID") == "1":
+    try:
+        import sys as _s, pathlib as _p
+        _s.path.insert(0, str(_p.Path(__file__).resolve().parents[2]))
+        import dns_cozucu as _dns
+        _dns.yama_kur()
+    except Exception:  # noqa: BLE001
+        pass
+
 import base64
 import csv
 import datetime as dt
@@ -66,6 +77,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Paketlenmiş uygulamada yazılabilir veri klasörü UYAP_VERI_DIZINI ile verilir
 BASE_DIR = Path(os.environ.get("UYAP_VERI_DIZINI") or Path(__file__).resolve().parent)
+BASE_DIR.mkdir(parents=True, exist_ok=True)  # günlük dosyası açılmadan önce veri klasörü bulunmalı
 if os.environ.get("UYAP_INDIRME_DIZINI"):
     DEFAULT_DOWNLOAD_DIR = Path(os.environ["UYAP_INDIRME_DIZINI"])
 elif Path("/sdcard/Download").exists():
@@ -95,6 +107,41 @@ if not DEFAULT_E_IMZA_PIN:
 SIGN_CHALLENGE = "QWRhbGV0IEJha2FubMSxxJ/EsSBCaWxnaSDEsMWfbGVtIEdlbmVsIE3DvGTDvHJsw7zEn8O8IHRhcmFmxLFuZGFuIGdlbGnFn3RpcmlsZW4gdXlndWxhbWF5YSBlLWltemEgZ2lyacWfIHlhcG1hayBpc3RpeW9ydW0u"
 
 
+def win_extended_path(p: Path | str) -> str:
+    """Windows MAX_PATH (260 karakter) sınırlamasını aşmak için \\\\?\\ önekini uygular."""
+    sp = str(p)
+    if os.name == "nt":
+        abs_p = os.path.abspath(sp)
+        if not abs_p.startswith("\\\\?\\"):
+            if abs_p.startswith("\\\\"):
+                return "\\\\?\\UNC\\" + abs_p[2:]
+            return "\\\\?\\" + abs_p
+        return abs_p
+    return sp
+
+
+def safe_write_bytes(path: Path | str, data: bytes) -> Path:
+    """Windows'ta 260 karakterden uzun yollara dahi güvenli atomik dosya yazar."""
+    p = Path(path)
+    ext_p = win_extended_path(p)
+    parent_dir = os.path.dirname(ext_p)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    with open(ext_p, "wb") as f:
+        f.write(data)
+    return p
+
+
+def safe_replace_file(src: Path | str, dst: Path | str) -> None:
+    """Windows ve POSIX üzerinde uzun yollu dosyayı güvenle taşır/değiştirir."""
+    ext_src = win_extended_path(src)
+    ext_dst = win_extended_path(dst)
+    parent_dir = os.path.dirname(ext_dst)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    os.replace(ext_src, ext_dst)
+
+
 def load_user_config() -> dict:
     if CONFIG_FILE.exists():
         try:
@@ -103,6 +150,19 @@ def load_user_config() -> dict:
         except Exception:
             return {}
     return {}
+
+
+def mobil_imza_ayarlari() -> tuple[str, str, str]:
+    """Mobil İmza bilgileri: ortam değişkenleri (UYAP_TC, UYAP_GSM, UYAP_OPERATOR) > .uyap_config.json."""
+    cfg = load_user_config()
+    tc = os.environ.get("UYAP_TC") or str(cfg.get("tc") or "")
+    gsm = os.environ.get("UYAP_GSM") or str(cfg.get("gsm") or "")
+    op = os.environ.get("UYAP_OPERATOR") or str(cfg.get("operator") or "")
+    return tc.strip(), gsm.strip(), op.strip()
+
+
+# Mobil İmza tekrar aralıkları (sn): telefon art arda bildirimle boğulmasın; son değer sonsuza dek tekrarlanır
+MOBIL_IMZA_BEKLEMELERI = (60, 120, 300, 600)
 
 
 def save_user_config(data: dict):
@@ -820,8 +880,20 @@ class UyapBrowserBridge:
         açılana kadar artan aralıklarla bekler. Hiçbir zaman istisna fırlatmaz."""
         if headless is not None:
             self.is_headless = headless
+        # CanEditor gömülü tarayıcıyla çalışırken (CANASISTAN_GORUNMEZ=1) tarayıcı hiçbir zaman ön planda açılmaz
+        if os.environ.get("CANASISTAN_GORUNMEZ"):
+            self.is_headless = True
         if self._is_port_open():
             return True, f"Mevcut tarayıcı oturumuna bağlanıldı (Port {self.port})."
+
+        if os.environ.get("CANASISTAN_ANDROID") == "1":
+            # Android: tarayıcı CanEditor'un gizli WebView'ıdır (sunucu 127.0.0.1:9223'e köprüler); Chrome/Termux yok
+            for _ in range(20):
+                time.sleep(1.0)
+                if self._is_port_open():
+                    return True, "CanEditor gizli UYAP tarayıcısına bağlanıldı."
+            self.last_error = "Gizli UYAP tarayıcısı yanıt vermiyor; CanEditor uygulamasını açıp yeniden deneyin."
+            return False, self.last_error
 
         chrome_bin = self._find_chrome_bin()
         if not chrome_bin:
@@ -843,18 +915,21 @@ class UyapBrowserBridge:
         cmd = [
             chrome_bin,
             f"--remote-debugging-port={self.port}",
+            "--remote-debugging-address=127.0.0.1",
             "--remote-allow-origins=*",
             f"--user-data-dir={CHROME_PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-session-crashed-bubble",
         ]
-        if not IS_TERMUX:
-            cmd.insert(2, "--remote-debugging-address=127.0.0.1")
+        is_headless_shell = "headless-shell" in os.path.basename(chrome_bin).lower()
         has_display = self._detect_display()
-        if self.is_headless or not has_display:
+        if self.is_headless or not has_display or is_headless_shell:
             self.is_headless = True
-            cmd += ["--headless=new", "--disable-gpu", "--window-size=1366,900"]
+            # chrome-headless-shell zaten yalnızca başsızdır; --headless=new parametresi bazı sürümlerde reddedilir
+            if not is_headless_shell:
+                cmd.append("--headless=new")
+            cmd += ["--disable-gpu", "--window-size=1366,900"]
         if IS_TERMUX or (sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0):
             # Termux/Android'de Chromium sandbox'ı çalışmaz; /dev/shm yoktur.
             cmd += ["--no-sandbox", "--disable-dev-shm-usage"]
@@ -865,6 +940,8 @@ class UyapBrowserBridge:
         try:
             if sys.platform == "win32":
                 flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+                if self.is_headless:
+                    flags |= 0x08000000  # CREATE_NO_WINDOW: arka planda hiç pencere/konsol göstermeden aç
                 self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                              stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
             else:
@@ -907,18 +984,14 @@ class UyapBrowserBridge:
     # ------------------------------------------------------------------
     def _cdp_http(self, path: str, method: str = "GET", timeout: float = 2.5):
         """CDP HTTP uç noktası; bağlantı yoksa None döner (istisna fırlatmaz)."""
-        cur = getattr(self, "_cdp_host", "127.0.0.1")
-        hosts = [cur, "[::1]"] if cur == "127.0.0.1" else [cur, "127.0.0.1"]
-        for h in hosts:
-            url = f"http://{h}:{self.port}{path}"
-            try:
-                r = self._http.request(method, url, timeout=timeout)
-                if r.status_code == 200:
-                    self._cdp_host = h
-                    return r.json()
-            except Exception:
-                continue
-        return None
+        url = f"http://127.0.0.1:{self.port}{path}"
+        try:
+            r = self._http.request(method, url, timeout=timeout)
+            if r.status_code != 200:
+                return None
+            return r.json()
+        except Exception:
+            return None
 
     def _is_port_open(self) -> bool:
         info = self._cdp_http("/json/version", timeout=1.5)
@@ -934,10 +1007,18 @@ class UyapBrowserBridge:
         return [t for t in tabs if t.get("type") == "page"]
 
     def _ws_url(self, tab: dict) -> str:
-        ws = tab.get("webSocketDebuggerUrl") or ""
-        host = getattr(self, "_cdp_host", "127.0.0.1")
-        if host == "[::1]":
-            return ws.replace("ws://localhost:", "ws://[::1]:").replace("ws://127.0.0.1:", "ws://[::1]:")
+        ws = (tab.get("webSocketDebuggerUrl") or "").strip()
+        if not ws:
+            return ""
+        # Android WebView DevTools soyut UNIX soketinden geldiği için host/port eksik olabilir
+        # (örn. ws://localhost/devtools/page/1 veya ws:///devtools/page/1); her zaman 127.0.0.1:<port> yap.
+        from urllib.parse import urlparse
+        u = urlparse(ws)
+        if u.scheme in ("ws", "wss") and (not u.hostname or u.hostname in ("localhost", "127.0.0.1", "::1") or u.port is None):
+            path = u.path or "/"
+            if u.query:
+                path += "?" + u.query
+            return f"{u.scheme}://127.0.0.1:{self.port}{path}"
         return ws.replace("ws://localhost:", "ws://127.0.0.1:")
 
     def _pick(self, pages: list, target: str) -> dict | None:
@@ -957,14 +1038,19 @@ class UyapBrowserBridge:
 
     def _open_uyap_tab(self, pages: list) -> dict | None:
         """UYAP sekmesi yoksa boş bir sekmeyi UYAP'a yönlendirir ya da yeni sekme açar."""
+        # UETS'e ayrılmış gizli sayfa (about:blank#uets / uets.ptt.gov.tr) UYAP için kullanılmaz
+        pages = [t for t in pages if "uets" not in (t.get("url") or "").lower()]
         blank = next((t for t in pages if (t.get("url") or "").startswith(self.BLANK_PREFIXES)
                       and t.get("webSocketDebuggerUrl")), None)
+        # Android: /json/new yok; sunucu köprüsü yalnızca GİZLİ WebView'ları listeler, görünür ekran ele geçirilmez
+        if not blank and os.environ.get("CANASISTAN_ANDROID") == "1":
+            blank = next((t for t in pages if t.get("webSocketDebuggerUrl")), None)
         if blank:
             try:
                 self._ws_call(self._ws_url(blank), "Page.navigate", {"url": UYAP_BASE_URL}, timeout=10)
             except Exception:
                 blank = None
-        if not blank:
+        if not blank and os.environ.get("CANASISTAN_ANDROID") != "1":
             from urllib.parse import quote
             # Yeni Chrome sürümleri /json/new için PUT ister; eskileri GET
             if self._cdp_http(f"/json/new?{quote(UYAP_BASE_URL, safe=':/')}", method="PUT") is None:
@@ -1136,6 +1222,78 @@ class UyapBrowserBridge:
         if r.status_code != 200:
             return False, f"ArkSigner yanıt vermedi (HTTP {r.status_code})."
         return True, "ArkSigner hazır."
+
+    def kart_takili_mi(self) -> bool:
+        """e-İmza istemcisinde (5975) sertifikası okunabilen hazır bir kart var mı?"""
+        try:
+            r = self._http.get(f"{ARKSIGNER_URL}/api/v1/signature/getCertificates", timeout=6)
+            kartlar = (r.json() or {}).get("data") or [] if r.status_code == 200 else []
+        except (requests.exceptions.RequestException, ValueError):
+            return False
+        return any(k.get("ready") is not False and k.get("certificates") for k in kartlar)
+
+    def akilli_oturum_ac(self, pin: str = "", tc: str = "", gsm: str = "", operator: str = "",
+                         status_cb=None, sure_siniri_s: float | None = None, dur=None,
+                         beklemeler=MOBIL_IMZA_BEKLEMELERI, uyku=time.sleep) -> tuple[bool, str]:
+        """UYAP oturumunu açar/yeniler. Kural:
+          * e-İmza kartı takılıysa (ve PIN varsa) e-İmza ile girilir — sorun yok.
+          * Kart takılı değilse ya da e-İmza girişi bağlantı/kart nedeniyle olmazsa Mobil İmza gönderilir.
+          * Oturum açılana kadar tekrarlanır (kopan bağlantı da böyle yeniden kurulur). Mobil İmza denemeleri
+            arasında MOBIL_IMZA_BEKLEMELERI kadar beklenir; beklerken kart takılırsa hemen e-İmzaya dönülür.
+          * Kartın reddettiği PIN asla yeniden denenmez (kart bloke olmasın).
+        sure_siniri_s: toplam süre sınırı (None = sınırsız); dur: threading.Event — set edilince durur."""
+        def bildir(m):
+            (status_cb or file_logger.info)(m)
+
+        pin, tc, gsm = str(pin or "").strip(), str(tc or "").strip(), str(gsm or "").strip()
+        if not tc or not gsm:
+            c_tc, c_gsm, c_op = mobil_imza_ayarlari()
+            tc, gsm, operator = tc or c_tc, gsm or c_gsm, operator or c_op
+        mobil_var = bool(tc and gsm)
+        if not pin and not mobil_var:
+            return False, ("Oturum açılamadı: e-İmza PIN'i de Mobil İmza bilgileri (TC + GSM) de tanımlı değil. "
+                           ".uyap_config.json içine tc/gsm/operator yazın ya da PIN'i girin.")
+        bas = time.monotonic()
+        deneme, son_hata = 0, ""
+
+        def sure_doldu() -> bool:
+            return (dur is not None and dur.is_set()) or (sure_siniri_s is not None and time.monotonic() - bas > sure_siniri_s)
+
+        while not sure_doldu():
+            try:
+                if self.is_logged_in():
+                    return True, "UYAP oturumu açık."
+            except Exception:  # tarayıcı/bağlantı geçici olarak yoksa giriş denemesi zaten yeniden kurar
+                pass
+            pin_hash = hashlib.sha256(pin.encode("utf-8")).hexdigest() if pin else ""
+            if pin and pin_hash not in self._rejected_pins and self.kart_takili_mi():
+                bildir("🔑 e-İmza kartı takılı: e-İmza ile oturum açılıyor…")
+                ok, msg = self.auto_relogin(pin=pin)
+                if ok:
+                    return True, msg
+                son_hata = msg
+                bildir(f"⚠️ e-İmza ile girilemedi: {msg}")
+            if not mobil_var:
+                # Yalnız e-İmza tanımlı: kart takılana / bağlantı gelene kadar bekle
+                deneme += 1
+                bekle = beklemeler[min(deneme - 1, len(beklemeler) - 1)]
+                bildir(f"⏳ e-İmza kartı bekleniyor (Mobil İmza tanımlı değil); {bekle} sn sonra yeniden denenecek.")
+            else:
+                deneme += 1
+                bildir(f"📲 Mobil İmza gönderiliyor (deneme {deneme}) — telefonunuzdaki bildirimi onaylayın.")
+                ok, msg = self.login_with_mobil_imza(tc, gsm, operator or "turktelekom", status_cb=status_cb)
+                if ok:
+                    return True, msg
+                son_hata = msg
+                bekle = beklemeler[min(deneme - 1, len(beklemeler) - 1)]
+                bildir(f"⚠️ Mobil İmza ile girilemedi: {msg} — {bekle} sn sonra yeniden denenecek.")
+            # Beklerken kart takılırsa ya da durdurulursa hemen dön
+            hedef = time.monotonic() + bekle
+            while time.monotonic() < hedef and not sure_doldu():
+                uyku(min(5.0, max(0.0, hedef - time.monotonic())))
+                if pin and pin_hash not in self._rejected_pins and self.kart_takili_mi():
+                    break
+        return False, f"Oturum açılamadı (süre doldu/durduruldu). Son hata: {son_hata or '-'}"
 
     # Kart okuyucu oturumu takılınca (ilk girişten sonra "Kart okuyucudan sertifika alınamadı")
     # e-İmza istemcisini yeniden başlatmak gerekir; bunu otomatik yapar.
@@ -1672,6 +1830,9 @@ class UyapBrowserBridge:
                 # Sayfa veya buton değiştiğinde canlı tarama ve kayıt tutma
                 state_sig = f"{page}|{curr_url}|{tuple(btn_texts)}"
                 if state_sig != last_page:
+                    if page != (last_page.split("|", 1)[0] if last_page else None):
+                        # Tanı: hangi adımda takıldığı Görevler/Tanı günlüğünde görünsün
+                        log_msg(f"[i] Giriş adımı: {page or 'bilinmiyor'} ({(curr_url or '')[:80]})")
                     last_page = state_sig
                     file_logger.info(f"[e-Devlet Taraması] Sayfa: {page} | Başlık: '{title}' | URL: {curr_url} | Butonlar: {btn_texts}")
 
@@ -1941,7 +2102,9 @@ class UyapBrowserBridge:
             except Exception:
                 pass
 
-        durum_vals = [1, 0] if include_closed else [1]
+        # Her iki durum kodu da sorgulanır; açık/kapalı ayrımı UYAP'ın döndürdüğü dosyaDurum alanından yapılır
+        # (kod anlamı yargı türüne göre değişebiliyor, eskiden yalnız açıklar istendiğinde kapalılar gelebiliyordu).
+        durum_vals = [0, 1]
         js = f"""
         (async () => {{
             const birimler = [
@@ -1956,6 +2119,19 @@ class UyapBrowserBridge:
                 ["25", "6701"]
             ];
             const durumlar = {json.dumps(durum_vals)};
+            // Avukatın yetkili olduğu TÜM birim türleri UYAP'tan dinamik alınır (icra daireleri dahil); sabit listede
+            // olmayan birimlerin dosyaları eskiden hiç gelmiyordu (icra dosyaları "Dosya Hesapları"nda görünmüyordu).
+            for (const yt of ["0", "1", "2", "6", "11", "25"]) {{
+                try {{
+                    const r = await fetch("/yargiBirimleriSorgula_brd.ajx", {{method: "POST",
+                        headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({{yargiTuru: yt}})}});
+                    const d = r.ok ? await r.json() : null;
+                    if (Array.isArray(d)) for (const b of d) {{
+                        const kod = String((b && b.tablo) || "");
+                        if (kod && !birimler.some(x => x[0] === yt && x[1] === kod)) birimler.push([yt, kod]);
+                    }}
+                }} catch (e) {{}}
+            }}
 
             // UYAP aynı anda çok sayıda isteği zaman zaman reddeder: her istek 3 kez denenir,
             // aynı anda en fazla 6 istek çalışır (önceden reddedilen kategoriler sessizce boş dönüyordu).
@@ -1996,7 +2172,11 @@ class UyapBrowserBridge:
                                 }});
                                 if (d === null) {{ failed++; break; }}
                                 const list = Array.isArray(d[0]) ? d[0] : [];
-                                for (const x of list) out.push({{...x, dosyaDurumGenel: durum === 1 ? "Açık" : "Kapalı"}});
+                                for (const x of list) {{
+                                    const dd = String(x.dosyaDurum || "").toLocaleLowerCase("tr");
+                                    const genel = dd ? (dd.startsWith("açık") || dd.startsWith("acik") ? "Açık" : "Kapalı") : (durum === 0 ? "Açık" : "Kapalı");
+                                    out.push({{...x, dosyaDurumGenel: genel}});
+                                }}
                                 if (list.length < 200) break;
                             }} catch (e) {{
                                 break;
@@ -2036,7 +2216,9 @@ class UyapBrowserBridge:
             return allCases;
         }})()
         """
-        cases = self.eval_js(js, timeout=120.0) or []
+        cases = self.eval_js(js, timeout=240.0) or []
+        if not include_closed:
+            cases = [c for c in cases if c.get("dosyaDurumGenel") == "Açık"]
         if cases and include_closed:
             try:
                 cache_file.write_text(
@@ -2145,7 +2327,7 @@ FOLDER_PRESETS = [
 
 
 class UyapDownloaderApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: "tk.Tk"):
         self.root = root
         self.root.title("UYAP Avukat Portal - Güvenli Evrak İndirici (e-İmza Otomatik Yenilemeli)")
         self.root.geometry("1280x880")
@@ -2259,12 +2441,11 @@ class UyapDownloaderApp:
         elif is_emir and f"islem_{is_emir}" in self.history:
             entry = self.history[f"islem_{is_emir}"]
         # 3. Geçmişteki is_emir_no alanları arasında ara (kısa birim evrak no'ları mahkemeler
-        #    arasında çakışabilir; yalnızca uzun, global işlem numaralarında güvenli)
+        #    arasında çakışabilir; yalnızca uzun, global işlem numaralarında güvenli).
+        #    Eskiden her evrak için tüm geçmiş baştan sona taranıyordu (binlerce evrakta dakikalar);
+        #    artık bir kez kurulan dizinle O(1).
         elif is_emir and len(is_emir) >= 8:
-            for h in self.history.values():
-                if str(h.get("is_emir_no") or "").strip() == is_emir:
-                    entry = h
-                    break
+            entry = self._gecmis_dizini()[0].get(is_emir)
 
         # 4. Alternatif eşleşme: Birim adı, dosya no, tarih ve evrak adı birebir aynı mı?
         b_adi = item.get("birim_adi") if item else None
@@ -2273,15 +2454,7 @@ class UyapDownloaderApp:
         tarih = item.get("tarih") if item else None
         # Boş alanlar (None == None) yanlış eşleşme üretmesin
         if not entry and item and b_adi and e_adi and tarih:
-            for h in self.history.values():
-                if (
-                    h.get("birim_adi") == b_adi
-                    and h.get("dosya_no") == d_no
-                    and h.get("evrak_turu") == e_adi
-                    and h.get("tarih") == tarih
-                ):
-                    entry = h
-                    break
+            entry = self._gecmis_dizini()[1].get((b_adi, d_no, e_adi, tarih))
 
         if entry:
             path_str = entry.get("path")
@@ -2313,6 +2486,34 @@ class UyapDownloaderApp:
             self._history_dirty = True
             return True
         return False
+
+    def _gecmis_dizini(self):
+        """Geçmiş (indirme_gecmisi.json) için arama dizinleri: (is_emir_no → kayıt, (birim, dosya, evrak, tarih) → kayıt,
+        sha256 → kayıt). Geçmiş büyüdükçe kendiliğinden yenilenir."""
+        anahtar = (id(self.history), len(self.history))
+        if getattr(self, "_gd_anahtar", None) != anahtar:
+            emir, icerik, sha = {}, {}, {}
+            for h in self.history.values():
+                if not isinstance(h, dict):
+                    continue
+                e = str(h.get("is_emir_no") or "").strip()
+                if e and e not in emir:
+                    emir[e] = h
+                k = (h.get("birim_adi"), h.get("dosya_no"), h.get("evrak_turu"), h.get("tarih"))
+                if k[0] and k[2] and k[3] and k not in icerik:
+                    icerik[k] = h
+                if h.get("sha256") and h.get("path") and h["sha256"] not in sha:
+                    sha[h["sha256"]] = h
+            self._gd = (emir, icerik, sha)
+            self._gd_anahtar = anahtar
+        return self._gd
+
+    def ayni_icerik_var(self, raw_bytes: bytes):
+        """İndirilen içerik (SHA-256) diskte zaten varsa o dosyanın yolunu döner: ikinci kopya yazılmaz."""
+        h = self._gecmis_dizini()[2].get(hashlib.sha256(raw_bytes).hexdigest())
+        if h and h.get("path") and Path(h["path"]).exists():
+            return Path(h["path"])
+        return None
 
     _DISK_ID_RX = re.compile(
         r"_(\d{6,})(?:_\d{1,3})?\.(?:udf|pdf|tif|tiff|jpe?g|png|gif|docx?|xlsx?|zip|rar|xml|html?|txt|eyp|p7s)$",
@@ -3138,9 +3339,24 @@ class UyapDownloaderApp:
             parts = [f"evrak_{tokens['is_emir_no'] or tokens['evrak_id']}"]
 
         ident = tokens["is_emir_no"] or tokens["evrak_id"]
+        # v4.9.3: Windows MAX_PATH (260) — AppData altındaki kökle birlikte "Avukat Evrak Kaydi (İstinaf Ba..."
+        # gibi uzun klasör adları sınırı aşıyor, "[Errno 2] No such file or directory" ile İşlemlerim çöküyordu.
+        # EN: shrink folder parts and file stem until the absolute path fits in 230 chars (.part suffix included).
+        sinir = 230
+        def _tam(pp):
+            return len(str(base_dir.joinpath(*pp[:-1]))) + 1 + len(f"{pp[-1]}_{ident}{ext}.part")
+        uzunluk = 50
+        while _tam(parts) > sinir and uzunluk >= 12:
+            parts = [x[:uzunluk].rstrip(". _") or "Klasor" for x in parts]
+            uzunluk -= 6
+        if _tam(parts) > sinir:
+            parts = parts[:1] + [parts[-1][:35]]
         filename_stem = f"{parts[-1]}_{ident}"
         folder_path = base_dir.joinpath(*parts[:-1])
-        folder_path.mkdir(parents=True, exist_ok=True)
+        try:
+            os.makedirs(win_extended_path(folder_path), exist_ok=True)
+        except Exception:
+            folder_path.mkdir(parents=True, exist_ok=True)
         return folder_path / f"{filename_stem}{ext}"
 
     def on_choose_dir(self):
@@ -3299,17 +3515,20 @@ class UyapDownloaderApp:
 
                             ext = guess_extension(cd_filename, ct, raw_bytes)
                             target_path = self.build_target_filepath(item, ext)
-                            target_path.parent.mkdir(parents=True, exist_ok=True)
 
                             # Atomik dosya kaydı: Önce .part dosyasına yaz, sonra doğrula ve taşı
                             tmp_path = target_path.with_suffix(target_path.suffix + ".part")
-                            tmp_path.write_bytes(raw_bytes)
+                            safe_write_bytes(tmp_path, raw_bytes)
 
-                            if tmp_path.exists() and tmp_path.stat().st_size == len(raw_bytes):
-                                tmp_path.replace(target_path)
+                            ext_tmp = win_extended_path(tmp_path)
+                            if os.path.exists(ext_tmp) and os.path.getsize(ext_tmp) == len(raw_bytes):
+                                safe_replace_file(tmp_path, target_path)
                             else:
-                                target_path.write_bytes(raw_bytes)
-                                tmp_path.unlink(missing_ok=True)
+                                safe_write_bytes(target_path, raw_bytes)
+                                try:
+                                    os.unlink(ext_tmp)
+                                except OSError:
+                                    pass
 
                             auto_convert_udf_to_pdf(target_path)
 
@@ -3975,19 +4194,14 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
 
                 if is_session_dead:
                     print(f"[!] UYARI: Evrak alınamadı ({item['evrak_adi']}) - {reason} [Deneme {attempt}/{max_retries}]")
-                    cfg = load_user_config()
-                    c_tc = cfg.get("tc", tckn)
-                    c_gsm = cfg.get("gsm", "")
-                    c_op = cfg.get("operator", "2")
-                    if c_tc and c_gsm and attempt < max_retries:
-                        print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
-                        m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
+                    if attempt < max_retries:
+                        # Kart takılıysa e-İmza, değilse oturum açılana kadar Mobil İmza
+                        m_ok, m_msg = bridge.akilli_oturum_ac(pin=DEFAULT_E_IMZA_PIN, status_cb=print)
                         if m_ok:
                             print(f"[✓] {m_msg}.")
                             refresh_dosya_ids_in_queue(bridge, download_queue, idx - 1)
                             continue
-                        else:
-                            print(f"[x] Mobil İmza ile oturum yenilenemedi: {m_msg}")
+                        print(f"[x] Oturum yenilenemedi: {m_msg}")
                     time.sleep(3.0)
                     continue
 
@@ -4012,11 +4226,20 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                 doc_num = sanitize_path_part(item.get("is_emir_no") or clean_ev_id[:8], max_len=20)
                 
                 target_folder = target_base / yargi_slug / b_slug / d_slug / alt_kat
-                target_folder.mkdir(parents=True, exist_ok=True)
-
-                # Geçici dosyaya yazıp içeriği analiz et ve zenginleştir
+                ayni = app_helper.ayni_icerik_var(raw_bytes)
+                if ayni:
+                    # Aynı içerik başka bir evrak olarak zaten inmiş (ör. her dilekçeye eklenen vekaletname)
+                    app_helper.history[ukey] = {"path": str(ayni), "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                                                "downloaded_at": dt.datetime.now().isoformat(timespec="seconds"),
+                                                "size": len(raw_bytes), "tarih": item["tarih"], "birim_adi": item["birim_adi"],
+                                                "dosya_no": item["dosya_no"], "evrak_turu": item["evrak_adi"],
+                                                "is_emir_no": item.get("is_emir_no", ""), "mukerrer": True}
+                    app_helper._history_dirty = True
+                    print(f"[=] Mükerrer (aynı içerik zaten var, yazılmadı): {item['evrak_adi']} → {ayni.name}")
+                    success = True
+                    break
                 tmp_path = target_folder / f"temp_{doc_num}{clean_ext}.part"
-                tmp_path.write_bytes(raw_bytes)
+                safe_write_bytes(tmp_path, raw_bytes)
 
                 meta = {}
                 if clean_ext == ".udf":
@@ -4051,10 +4274,15 @@ def run_cli_dosyalar_mode(args, bridge, app_helper, download_dir, tckn):
                 )
 
                 target_path = target_folder / file_name
-                if tmp_path.exists():
-                    tmp_path.replace(target_path)
+                ext_tmp = win_extended_path(tmp_path)
+                if os.path.exists(ext_tmp) and os.path.getsize(ext_tmp) == len(raw_bytes):
+                    safe_replace_file(tmp_path, target_path)
                 else:
-                    target_path.write_bytes(raw_bytes)
+                    safe_write_bytes(target_path, raw_bytes)
+                    try:
+                        os.unlink(ext_tmp)
+                    except OSError:
+                        pass
 
                 auto_convert_udf_to_pdf(target_path)
 
@@ -4534,7 +4762,12 @@ def run_cli_mode(args):
     # 2. Tarayıcı + UYAP oturumu (Mobil İmza / e-İmza / elle giriş) - tek yerden
     bridge, user = cli_ensure_session(args)
     if not user:
+        print("[x] UYAP oturumu açılamadı.")
         return 1
+    if getattr(args, "mode", "") == "login":
+        ad = f"{user.get('adi', '')} {user.get('soyadi', '')}".strip() or "Avukat"
+        print(f"✅ UYAP oturumu doğrulandı: Sayın {ad}")
+        return 0
     tckn = _tckn_of(user)
     pin = args.pin or DEFAULT_E_IMZA_PIN
     auto_relogin = not args.no_auto_relogin
@@ -4639,32 +4872,16 @@ def run_cli_mode(args):
 
             if is_session_expired:
                 print(f"\n[!] UYARI: UYAP oturum süresi doldu (HTTP {resp.get('status', '401')}).")
-                if auto_relogin and pin:
-                    print("[*] e-İmza ile otomatik oturum yenileniyor...")
-                    re_ok, re_msg = bridge.auto_relogin(pin=pin)
-                    if re_ok:
-                        print(f"[✓] {re_msg}")
-                        time.sleep(1.5)
-                        continue
-                    else:
-                        print(f"[x] e-İmza yenileme başarısız: {re_msg}")
-
-                cfg = load_user_config()
-                c_tc = cfg.get("tc", tckn)
-                c_gsm = cfg.get("gsm", "")
-                c_op = cfg.get("operator", "2")
-                if c_tc and c_gsm:
-                    print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
-                    m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
-                    if m_ok:
-                        print(f"[✓] {m_msg}")
-                        time.sleep(2.0)
-                        u_info = bridge.check_login_and_user()
-                        user = u_info.get("user") or {}
-                        tckn = str(user.get("tcKimlikNo") or user.get("tckn") or tckn)
-                        continue
-                    else:
-                        print(f"[x] Mobil İmza yenileme başarısız: {m_msg}")
+                # Kart takılıysa e-İmza, değilse oturum açılana kadar Mobil İmza
+                m_ok, m_msg = bridge.akilli_oturum_ac(pin=pin if auto_relogin else "", status_cb=print)
+                if m_ok:
+                    print(f"[✓] {m_msg}")
+                    time.sleep(2.0)
+                    u_info = bridge.check_login_and_user()
+                    user = u_info.get("user") or {}
+                    tckn = str(user.get("tcKimlikNo") or user.get("tckn") or tckn)
+                    continue
+                print(f"[x] Oturum yenilenemedi: {m_msg}")
 
                 print("[!] Lütfen UYAP'a giriş yapınız, oturum bekleniyor...")
                 while True:
@@ -4836,30 +5053,15 @@ def run_cli_mode(args):
 
                 # Oturum gerçekten düşmüşse yeniden giriş yap:
                 print(f"[!] UYARI: UYAP oturumu sonlanmış ({reason}). Yeniden bağlanılıyor... [Deneme {attempt}/{max_retries}]")
-                if auto_relogin and pin and attempt < max_retries:
-                    print("[*] e-İmza ile otomatik oturum yenileniyor...")
-                    re_ok, re_msg = bridge.auto_relogin(pin=pin)
+                if attempt < max_retries:
+                    # Kart takılıysa e-İmza, değilse oturum açılana kadar Mobil İmza
+                    re_ok, re_msg = bridge.akilli_oturum_ac(pin=pin if auto_relogin else "", status_cb=print)
                     if re_ok:
                         print(f"[✓] {re_msg}. Evrak tekrar deneniyor...")
                         time.sleep(2.0)
                         continue
-                    else:
-                        print(f"[x] Otomatik giriş başarısız: {re_msg}")
-                        time.sleep(3.0)
-                elif attempt < max_retries:
-                    cfg = load_user_config()
-                    c_tc = cfg.get("tc", "")
-                    c_gsm = cfg.get("gsm", "")
-                    c_op = cfg.get("operator", "2")
-                    if c_tc and c_gsm:
-                        print(f"[*] Mobil İmza ile oturum yenileniyor ({c_gsm})...")
-                        m_ok, m_msg = bridge.login_with_mobil_imza(c_tc, c_gsm, c_op)
-                        if m_ok:
-                            print(f"[✓] {m_msg}. Evrak tekrar deneniyor...")
-                            time.sleep(2.0)
-                            continue
-                    print("[!] Lütfen UYAP oturumunuzu kontrol edin/yenileyin (Mobil İmza / e-İmza)...")
-                    time.sleep(5.0)
+                    print(f"[x] Oturum yenilenemedi: {re_msg}")
+                    time.sleep(3.0)
                     continue
 
             if is_valid:
@@ -4871,17 +5073,32 @@ def run_cli_mode(args):
 
                 ext = guess_extension(cd_filename, ct, raw_bytes)
 
+                ayni = app_helper.ayni_icerik_var(raw_bytes)
+                if ayni:
+                    app_helper.history[ukey] = {"path": str(ayni), "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                                                "downloaded_at": dt.datetime.now().isoformat(timespec="seconds"),
+                                                "size": len(raw_bytes), "tarih": item["tarih"], "birim_adi": item["birim_adi"],
+                                                "dosya_no": item["dosya_no"], "evrak_turu": item["evrak_turu"],
+                                                "is_emir_no": item.get("is_emir_no", ""), "mukerrer": True}
+                    app_helper._history_dirty = True
+                    print(f"[=] Mükerrer (aynı içerik zaten var, yazılmadı): {item['evrak_adi']} → {ayni.name}")
+                    success = True
+                    break
+
                 target_path = app_helper.build_target_filepath(item, ext, override_dir=download_dir)
-                target_path.parent.mkdir(parents=True, exist_ok=True)
 
                 tmp_path = target_path.with_suffix(target_path.suffix + ".part")
-                tmp_path.write_bytes(raw_bytes)
+                safe_write_bytes(tmp_path, raw_bytes)
 
-                if tmp_path.exists() and tmp_path.stat().st_size == len(raw_bytes):
-                    tmp_path.replace(target_path)
+                ext_tmp = win_extended_path(tmp_path)
+                if os.path.exists(ext_tmp) and os.path.getsize(ext_tmp) == len(raw_bytes):
+                    safe_replace_file(tmp_path, target_path)
                 else:
-                    target_path.write_bytes(raw_bytes)
-                    tmp_path.unlink(missing_ok=True)
+                    safe_write_bytes(target_path, raw_bytes)
+                    try:
+                        os.unlink(ext_tmp)
+                    except OSError:
+                        pass
 
                 auto_convert_udf_to_pdf(target_path)
 
@@ -4968,7 +5185,9 @@ def main():
     parser.add_argument("--gsm", type=str, default="", help="Mobil İmza için GSM Numarası (başında sıfır olmadan 10 hane)")
     parser.add_argument("--operator", type=str, default="", choices=["", "turktelekom", "turkcell", "vodafone", "1", "2", "3"], help="Mobil İmza operatörü (turktelekom, turkcell, vodafone)")
     parser.add_argument("--mobil-imza", action="store_true", help="Oturum yoksa doğrudan Mobil İmza akışını başlat")
-    parser.add_argument("--mode", type=str, default="islemlerim", choices=["islemlerim", "dosyalar", "durusmalar"], help="Çalışma modu: islemlerim, dosyalar (dava dosyası evrakları), durusmalar (duruşma takvimi)")
+    # v4.9.3: "login" modu eklendi — Görevler'deki "UYAP oturum aç (e-imza)" bu modu çağırıyordu ama argparse
+    # tanımıyordu ("invalid choice: 'login'", kod 2). Yalnızca oturumu açar/doğrular ve çıkar, indirme yapmaz.
+    parser.add_argument("--mode", type=str, default="islemlerim", choices=["islemlerim", "dosyalar", "durusmalar", "login"], help="Çalışma modu: islemlerim, dosyalar (dava dosyası evrakları), durusmalar (duruşma takvimi), login (yalnız oturum aç)")
     parser.add_argument("--evrak-turu", type=str, default="", help="Dava dosyalarından indirilecek evrak türü (durusma, bilirkisi, karar, tensip, dilekce, iddianame, kesinlesme, tumu veya serbest metin)")
     parser.add_argument("--include-attachments", action="store_true", help="Evrakların ek belgelerini de indir")
     parser.add_argument("--scope", type=str, default="all", choices=["all", "acik", "fav"], help="Taranacak dosya kapsamı: all (Açık + Kapalı - 700+ Dosya), acik (Yalnızca Açık), fav (Sık Kullanılanlar)")
