@@ -40,3 +40,6 @@ loglar/
 scratch/
 *.ics
 *.spec.bak
+
+G:*
+*Drive*
