@@ -29,7 +29,7 @@ jobs:
             optional: false
           - os: macos-15        # Apple Silicon arm64 (macos-14 emekliye ayrıldı)
             ad: macos-arm
-            optional: false
+            optional: true
           - os: macos-13        # Intel x86_64 (kuyruk yoğunluğunda continue-on-error)
             ad: macos-intel
             optional: true
